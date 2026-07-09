@@ -1,8 +1,8 @@
 name: run
 
 # Generic build runner. Triggered manually only. Pulls a private source tree,
-# builds it on a macOS runner, and ships the result. No source and no keys live
-# in this repo — everything sensitive is an encrypted Actions secret.
+# builds it (iOS on macOS, Android on Linux), and ships it. No source and no keys
+# live in this repo — everything sensitive is an encrypted, repo-scoped Actions secret.
 
 on:
   workflow_dispatch:
@@ -11,6 +11,12 @@ on:
         description: "target"
         required: true
         type: string
+      platform:
+        description: "platform"
+        required: true
+        default: ios
+        type: choice
+        options: [ios, android]
       profile:
         description: "profile"
         required: true
@@ -23,7 +29,7 @@ on:
         type: boolean
 
 concurrency:
-  group: run-${{ inputs.target }}
+  group: run-${{ inputs.target }}-${{ inputs.platform }}
   cancel-in-progress: false
 
 # Least privilege: this workflow never needs to write back to this repo.
@@ -32,22 +38,20 @@ permissions:
 
 jobs:
   job:
-    runs-on: macos-latest
+    # iOS must build on macOS; Android builds on Linux (faster). Both are free on a public repo.
+    runs-on: ${{ inputs.platform == 'ios' && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 90
     steps:
       # Clone the PRIVATE source using a read-only, single-repo token.
-      # SOURCE_REPO (e.g. owner/name) is itself a secret, so the YAML names nothing.
-      # The token is interpolated by the runner and masked in logs; git does not
-      # echo the remote URL.
+      # SOURCE_REPO (owner/name) is itself a secret, so the YAML names nothing.
       - name: Fetch
         env:
           TKN: ${{ secrets.SOURCE_PAT }}
           REPO: ${{ secrets.SOURCE_REPO }}
         run: git clone --depth 1 "https://x-access-token:${TKN}@github.com/${REPO}.git" src
 
-      # macOS runners ship a current Node LTS + Xcode + CocoaPods, so we add NO
-      # third-party actions at all (zero supply-chain surface). eas-cli is the
-      # only global install.
+      # Runners ship a current Node LTS (+ Xcode/CocoaPods on macOS), so we add NO
+      # third-party actions (zero supply-chain surface). eas-cli is the only global install.
       - name: Toolchain
         run: npm install -g eas-cli
 
@@ -55,29 +59,33 @@ jobs:
         working-directory: src/${{ inputs.target }}
         run: npm ci
 
-      # Materialize the store API key to the path the checked-in eas.json expects
-      # (../credentials/… relative to the app folder). The key ID in the filename
-      # is an identifier, not a secret; the .p8 CONTENTS come from the secret.
+      # Materialize the store key the checked-in eas.json expects (../credentials/…),
+      # picking the right one per platform. Only the relevant secret is written.
       - name: Key
         env:
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          GOOGLE_PLAY_SA: ${{ secrets.GOOGLE_PLAY_SA }}
         run: |
           mkdir -p src/credentials
-          printf '%s\n' "$ASC_API_KEY_P8" > src/credentials/AuthKey_2D57UQV7B2.p8
+          if [ "${{ inputs.platform }}" = "ios" ]; then
+            printf '%s\n' "$ASC_API_KEY_P8" > src/credentials/AuthKey_2D57UQV7B2.p8
+          else
+            printf '%s'   "$GOOGLE_PLAY_SA" > src/credentials/google-play-service-account.json
+          fi
 
       - name: Build
         working-directory: src/${{ inputs.target }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: eas build --platform ios --profile "${{ inputs.profile }}" --local --non-interactive --output "$RUNNER_TEMP/out.ipa"
+        run: eas build --platform "${{ inputs.platform }}" --profile "${{ inputs.profile }}" --local --non-interactive --output "$RUNNER_TEMP/out.${{ inputs.platform == 'ios' && 'ipa' || 'aab' }}"
 
       - name: Ship
         if: ${{ inputs.submit }}
         working-directory: src/${{ inputs.target }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: eas submit --platform ios --profile "${{ inputs.profile }}" --path "$RUNNER_TEMP/out.ipa" --non-interactive
+        run: eas submit --platform "${{ inputs.platform }}" --profile "${{ inputs.profile }}" --path "$RUNNER_TEMP/out.${{ inputs.platform == 'ios' && 'ipa' || 'aab' }}" --non-interactive
 
       # NOTE: deliberately NO artifact upload. On a public repo, artifacts are
-      # downloadable by anyone — uploading the .ipa would leak the build. The
-      # binary goes straight to App Store Connect and nowhere else.
+      # downloadable by anyone — uploading the binary would leak the build. It goes
+      # straight to the store and nowhere else.
