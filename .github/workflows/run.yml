@@ -73,10 +73,26 @@ jobs:
             printf '%s'   "$GOOGLE_PLAY_SA" > src/credentials/google-play-service-account.json
           fi
 
+      # Android release builds OOM on the defaults (2 GiB heap / 512 MiB metaspace) during the
+      # multi-ABI native compile + Android lint — the daemon dies with OutOfMemoryError: Metaspace
+      # and the build hangs. Raise both (the runner has ~16 GB), cap parallel workers to curb peak
+      # memory, and disable the daemon (CI never reuses it). GRADLE_USER_HOME (~/.gradle)
+      # gradle.properties takes precedence over the one prebuild generates, so this wins.
+      - name: Android build memory
+        if: ${{ inputs.platform == 'android' }}
+        run: |
+          mkdir -p "$HOME/.gradle"
+          {
+            echo "org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=2g -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8"
+            echo "org.gradle.workers.max=2"
+            echo "org.gradle.daemon=false"
+          } >> "$HOME/.gradle/gradle.properties"
+
       - name: Build
         working-directory: src/${{ inputs.target }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          NODE_OPTIONS: --max-old-space-size=8192
         run: eas build --platform "${{ inputs.platform }}" --profile "${{ inputs.profile }}" --local --non-interactive --output "$RUNNER_TEMP/out.${{ inputs.platform == 'ios' && 'ipa' || 'aab' }}"
 
       - name: Ship
