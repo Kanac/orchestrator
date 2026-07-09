@@ -1,0 +1,83 @@
+name: run
+
+# Generic build runner. Triggered manually only. Pulls a private source tree,
+# builds it on a macOS runner, and ships the result. No source and no keys live
+# in this repo — everything sensitive is an encrypted Actions secret.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "target"
+        required: true
+        type: string
+      profile:
+        description: "profile"
+        required: true
+        default: production
+        type: string
+      submit:
+        description: "submit"
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: run-${{ inputs.target }}
+  cancel-in-progress: false
+
+# Least privilege: this workflow never needs to write back to this repo.
+permissions:
+  contents: read
+
+jobs:
+  job:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      # Clone the PRIVATE source using a read-only, single-repo token.
+      # SOURCE_REPO (e.g. owner/name) is itself a secret, so the YAML names nothing.
+      # The token is interpolated by the runner and masked in logs; git does not
+      # echo the remote URL.
+      - name: Fetch
+        env:
+          TKN: ${{ secrets.SOURCE_PAT }}
+          REPO: ${{ secrets.SOURCE_REPO }}
+        run: git clone --depth 1 "https://x-access-token:${TKN}@github.com/${REPO}.git" src
+
+      # macOS runners ship a current Node LTS + Xcode + CocoaPods, so we add NO
+      # third-party actions at all (zero supply-chain surface). eas-cli is the
+      # only global install.
+      - name: Toolchain
+        run: npm install -g eas-cli
+
+      - name: Install
+        working-directory: src/${{ inputs.target }}
+        run: npm ci
+
+      # Materialize the store API key to the path the checked-in eas.json expects
+      # (../credentials/… relative to the app folder). The key ID in the filename
+      # is an identifier, not a secret; the .p8 CONTENTS come from the secret.
+      - name: Key
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          mkdir -p src/credentials
+          printf '%s\n' "$ASC_API_KEY_P8" > src/credentials/AuthKey_2D57UQV7B2.p8
+
+      - name: Build
+        working-directory: src/${{ inputs.target }}
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: eas build --platform ios --profile "${{ inputs.profile }}" --local --non-interactive --output "$RUNNER_TEMP/out.ipa"
+
+      - name: Ship
+        if: ${{ inputs.submit }}
+        working-directory: src/${{ inputs.target }}
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: eas submit --platform ios --profile "${{ inputs.profile }}" --path "$RUNNER_TEMP/out.ipa" --non-interactive
+
+      # NOTE: deliberately NO artifact upload. On a public repo, artifacts are
+      # downloadable by anyone — uploading the .ipa would leak the build. The
+      # binary goes straight to App Store Connect and nowhere else.
