@@ -88,11 +88,22 @@ jobs:
             echo "org.gradle.daemon=false"
           } >> "$HOME/.gradle/gradle.properties"
 
+      # EXPO_ASC_*: lets eas mint/validate iOS credentials (dist cert check +
+      # provisioning profile) NON-interactively via the ASC API key — required
+      # for a brand-new app's FIRST iOS build (before this, first builds needed
+      # a one-off interactive `eas build` on a machine). Key/issuer ids are
+      # identifiers, not secrets — useless without the .p8, which stays sealed.
+      # No-ops for Android and for apps whose credentials already exist.
       - name: Build
         working-directory: src/${{ inputs.target }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           NODE_OPTIONS: --max-old-space-size=8192
+          EXPO_ASC_API_KEY_PATH: ${{ github.workspace }}/src/credentials/AuthKey_2D57UQV7B2.p8
+          EXPO_ASC_KEY_ID: 2D57UQV7B2
+          EXPO_ASC_ISSUER_ID: a519b1df-17b1-4173-b1dc-f51d0d0aec8d
+          EXPO_APPLE_TEAM_ID: 6CJM66G3S2
+          EXPO_APPLE_TEAM_TYPE: INDIVIDUAL
         run: eas build --platform "${{ inputs.platform }}" --profile "${{ inputs.profile }}" --local --non-interactive --output "$RUNNER_TEMP/out.${{ inputs.platform == 'ios' && 'ipa' || 'aab' }}"
 
       - name: Ship
