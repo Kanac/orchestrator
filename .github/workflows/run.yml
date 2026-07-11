@@ -39,7 +39,10 @@ permissions:
 jobs:
   job:
     # iOS must build on macOS; Android builds on Linux (faster). Both are free on a public repo.
-    runs-on: ${{ inputs.platform == 'ios' && 'macos-latest' || 'ubuntu-latest' }}
+    # iOS pins macos-26 (Xcode 26.5 default): Apple's iOS-26-SDK upload gate (live 2026-07-11)
+    # rejects Xcode-16 binaries, and `eas build --local` uses the RUNNER's Xcode (eas.json image
+    # pins don't apply to --local). macos-latest still resolves to macOS 15 / Xcode 16.
+    runs-on: ${{ inputs.platform == 'ios' && 'macos-26' || 'ubuntu-latest' }}
     timeout-minutes: 90
     steps:
       # Clone the PRIVATE source using a read-only, single-repo token.
