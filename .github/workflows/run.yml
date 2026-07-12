@@ -109,6 +109,29 @@ jobs:
           EXPO_APPLE_TEAM_TYPE: INDIVIDUAL
         run: eas build --platform "${{ inputs.platform }}" --profile "${{ inputs.profile }}" --local --non-interactive --output "$RUNNER_TEMP/out.${{ inputs.platform == 'ios' && 'ipa' || 'aab' }}"
 
+      # Log the FINAL Android AAB's base-manifest permissions (the artifact Google Play
+      # actually validates), plus its sha256 so the submitted binary is provably the one
+      # inspected here. The AAB base manifest is protobuf, but permission-name strings are
+      # stored as plain UTF-8 bytes, so grep -a finds them without aapt2/bundletool.
+      # Log-only (never fails): ad-supported apps legitimately carry AD_ID; this is
+      # observability, not a gate. For ad-free apps, "AD_ID present" here explains a
+      # subsequent Play "Advertising ID" upload rejection before you go hunting.
+      - name: Android manifest permissions
+        if: ${{ inputs.platform == 'android' }}
+        run: |
+          AAB="$RUNNER_TEMP/out.aab"
+          echo "sha256: $(sha256sum "$AAB" | cut -d' ' -f1)"
+          echo "=== base manifest permissions ==="
+          unzip -p "$AAB" base/manifest/AndroidManifest.xml \
+            | grep -aoE '(android|com\.[a-z0-9.]+)\.permission\.[A-Za-z0-9_]+' \
+            | sort -u || true
+          echo "=== AD_ID gate (informational) ==="
+          if unzip -p "$AAB" base/manifest/AndroidManifest.xml | grep -aq 'com\.google\.android\.gms\.permission\.AD_ID'; then
+            echo "PRESENT: com.google.android.gms.permission.AD_ID (OK only if this app declares Advertising ID = Yes)"
+          else
+            echo "ABSENT: com.google.android.gms.permission.AD_ID"
+          fi
+
       - name: Ship
         if: ${{ inputs.submit }}
         working-directory: src/${{ inputs.target }}
