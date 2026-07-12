@@ -27,6 +27,12 @@ on:
         required: true
         default: true
         type: boolean
+      ship_mode:
+        description: "ship_mode"
+        required: false
+        default: eas
+        type: choice
+        options: [eas, play-replace]
 
 concurrency:
   group: run-${{ inputs.target }}-${{ inputs.platform }}
@@ -133,11 +139,21 @@ jobs:
           fi
 
       - name: Ship
-        if: ${{ inputs.submit }}
+        if: ${{ inputs.submit && inputs.ship_mode != 'play-replace' }}
         working-directory: src/${{ inputs.target }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: eas submit --platform "${{ inputs.platform }}" --profile "${{ inputs.profile }}" --path "$RUNNER_TEMP/out.${{ inputs.platform == 'ios' && 'ipa' || 'aab' }}" --non-interactive
+
+      # Alternate Android ship: upload the AAB and make it the SOLE release on the target
+      # track(s) via the androidpublisher API (scripts/play-replace-release.mjs), instead of
+      # fastlane supply. Needed to supersede a stuck bundle that fastlane would retain in the
+      # release (e.g. a pre-fix AAB carrying AD_ID that blocks every commit). Runs on the
+      # runner using the AAB just built + the SA key the Key step wrote to src/credentials.
+      - name: Ship (play-replace)
+        if: ${{ inputs.submit && inputs.ship_mode == 'play-replace' && inputs.platform == 'android' }}
+        working-directory: src/${{ inputs.target }}
+        run: node ../scripts/play-replace-release.mjs "$RUNNER_TEMP/out.aab" production,internal
 
       # NOTE: deliberately NO artifact upload. On a public repo, artifacts are
       # downloadable by anyone — uploading the binary would leak the build. It goes
