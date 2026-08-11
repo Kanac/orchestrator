@@ -1,0 +1,29 @@
+# Twice-weekly health check of the fleet's load-bearing public URLs. Every store listing points
+# at these (privacy policy on every Play + ASC app, support/marketing URL on every ASC app), and
+# every fleet app renders the privacy link in its paywall. When GitHub Pages stopped serving them
+# on 2026-08-08 (a lapsed Pro plan on private repos), Apple's automated sweep rejected three apps
+# under Guideline 1.5 within hours and Google flagged a live app's privacy policy — the stores were
+# the monitoring. A red run here (GitHub emails the owner on failure) means: fix the hosting
+# (Kanac/syanac-legal + Kanac/syanac must serve — private repos need a paid plan, public always
+# serve; a plan change alone does NOT redeploy, POST /pages/builds does) BEFORE a store notices.
+name: url-health
+on:
+  schedule:
+    - cron: '17 14 * * 1,4'
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Privacy policy, studio site and custom domain serve 200
+        run: |
+          fail=0
+          for u in https://kanac.github.io/syanac-legal/ https://kanac.github.io/syanac/ https://syanac.me/; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 30 "$u" || echo 000)
+            echo "$u -> $code"
+            if [ "$code" != "200" ]; then
+              echo "::error::$u returned $code — every store listing and in-app privacy link points at this URL"
+              fail=1
+            fi
+          done
+          exit $fail
