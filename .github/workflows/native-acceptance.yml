@@ -230,7 +230,7 @@ jobs:
           sample_memory() {
             while true; do
               if [ "${{ inputs.platform }}" = "ios" ]; then
-                xcrun simctl spawn "$DEVICE_ID" ps -A -o rss=,command= 2>/dev/null \
+                ps -A -o rss=,command= 2>/dev/null \
                   | awk -v executable="$IOS_EXECUTABLE" '
                       {
                         rss = $1
@@ -273,7 +273,7 @@ jobs:
             "$HOME/.maestro/bin/maestro" --device="$DEVICE_ID" hierarchy || true
             if [ "${{ inputs.platform }}" = "ios" ]; then
               echo "=== iOS app process ==="
-              xcrun simctl spawn "$DEVICE_ID" ps -A -o pid=,rss=,command= \
+              ps -A -o pid=,rss=,command= \
                 | grep "$IOS_EXECUTABLE" || true
               echo "=== iOS app log (last 15 minutes) ==="
               xcrun simctl spawn "$DEVICE_ID" log show \
