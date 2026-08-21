@@ -138,8 +138,18 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :keychain-access-groups array" "$SIMULATOR_ENTITLEMENTS"
           /usr/libexec/PlistBuddy -c "Add :keychain-access-groups:0 string $SIMULATOR_APP_ID_PREFIX.$APP_ID" "$SIMULATOR_ENTITLEMENTS"
           plutil -lint "$SIMULATOR_ENTITLEMENTS"
+          # Once the outer app is signed, Simulator validates its embedded
+          # native code as a signed graph. Sign nested bundles and dylibs first
+          # so the app does not die as an invalid process before JavaScript.
+          while IFS= read -r -d '' NESTED_CODE; do
+            codesign --force --sign - --timestamp=none "$NESTED_CODE"
+          done < <(
+            find "$APP" -depth \
+              \( -type d -name '*.framework' -o -type d -name '*.appex' -o -type f -name '*.dylib' \) \
+              -print0
+          )
           codesign --force --sign - --timestamp=none --entitlements "$SIMULATOR_ENTITLEMENTS" "$APP"
-          codesign --verify --strict "$APP"
+          codesign --verify --deep --strict "$APP"
           echo "=== simulator signed entitlements ==="
           codesign -d --entitlements :- "$APP" 2>&1
           echo "IOS_APP=$APP" >> "$GITHUB_ENV"
@@ -172,6 +182,19 @@ jobs:
               --style compact \
               --predicate 'process == "SpringBoard" OR process == "runningboardd" OR process == "launchd_sim" OR process == "securityd"' \
               | tail -800 || true
+            echo "=== iOS app and code-signing diagnostics ==="
+            xcrun simctl spawn "$PHONE_UDID" log show \
+              --last 5m \
+              --style compact \
+              --predicate "process == '$IOS_EXECUTABLE' OR process == 'ReportCrash' OR process == 'amfid' OR process == 'kernel'" \
+              | tail -800 || true
+            echo "=== iOS app crash reports ==="
+            find "$HOME/Library/Logs/DiagnosticReports" \
+              -type f \
+              -name "$IOS_EXECUTABLE*" \
+              -mmin -10 \
+              -print \
+              -exec tail -800 {} \; 2>/dev/null || true
             exit "$PREFLIGHT_STATUS"
           fi
           echo "ios_preflight_launch=PASS"
