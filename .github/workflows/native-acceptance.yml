@@ -39,6 +39,9 @@ jobs:
     env:
       EXPO_NO_TELEMETRY: "1"
       MAESTRO_VERSION: "2.8.0"
+      # Maestro's default iOS driver startup window is too short on a cold
+      # public macOS runner. Its own CI raises this through the same variable.
+      MAESTRO_DRIVER_STARTUP_TIMEOUT: "300000"
       SYANAC_NATIVE_ACCEPTANCE: "1"
 
     steps:
