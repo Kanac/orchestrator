@@ -1,4 +1,5 @@
 name: native-acceptance
+run-name: native-acceptance · ${{ inputs.target }} · ${{ inputs.platform }}
 
 # Generic, non-submitting native runtime gate. It clones the private app fleet,
 # builds a simulator/emulator binary, installs it, runs the target app's checked-in
