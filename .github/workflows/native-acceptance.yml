@@ -85,8 +85,14 @@ jobs:
           SCHEME="$(xcodebuild -list -json -project "$PROJECT" | jq -r '.project.schemes | first')"
           test -n "$SCHEME"
           test "$SCHEME" != "null"
+          SIMULATOR_ARCH="$(uname -m)"
+          case "$SIMULATOR_ARCH" in
+            arm64|x86_64) ;;
+            *) echo "Unsupported iOS simulator host architecture: $SIMULATOR_ARCH" >&2; exit 1 ;;
+          esac
           echo "ios_project=$PROJECT"
           echo "ios_scheme=$SCHEME"
+          echo "ios_simulator_arch=$SIMULATOR_ARCH"
           xcodebuild \
             -workspace "$WORKSPACE" \
             -scheme "$SCHEME" \
@@ -95,7 +101,9 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
+            CODE_SIGNING_REQUIRED=NO \
+            ARCHS="$SIMULATOR_ARCH" \
+            ONLY_ACTIVE_ARCH=YES
           APP="$(find "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphonesimulator" -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -n "$APP"
           IOS_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
