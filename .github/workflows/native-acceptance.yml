@@ -108,6 +108,22 @@ jobs:
           test -n "$APP"
           IOS_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
           test -n "$IOS_EXECUTABLE"
+          # Unsigned simulator bundles have neither an application identifier nor
+          # a keychain access group. iOS then rejects every Keychain call with
+          # errSecMissingEntitlement, which makes SecureStore-backed release
+          # flows fail even though the signed device binary is valid. Give this
+          # ephemeral simulator app an isolated ad-hoc identity before install.
+          SIMULATOR_ENTITLEMENTS="$RUNNER_TEMP/native-simulator.entitlements"
+          plutil -create xml1 "$SIMULATOR_ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c "Add :application-identifier string SIMULATOR.$APP_ID" "$SIMULATOR_ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string SIMULATOR" "$SIMULATOR_ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c "Add :keychain-access-groups array" "$SIMULATOR_ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c "Add :keychain-access-groups:0 string SIMULATOR.$APP_ID" "$SIMULATOR_ENTITLEMENTS"
+          plutil -lint "$SIMULATOR_ENTITLEMENTS"
+          codesign --force --sign - --timestamp=none --entitlements "$SIMULATOR_ENTITLEMENTS" "$APP"
+          codesign --verify --strict "$APP"
+          echo "=== simulator signed entitlements ==="
+          codesign -d --entitlements :- "$APP" 2>&1
           echo "IOS_APP=$APP" >> "$GITHUB_ENV"
           echo "IOS_EXECUTABLE=$IOS_EXECUTABLE" >> "$GITHUB_ENV"
           echo "simulator_app_tree_sha256=$(find "$APP" -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')"
@@ -214,8 +230,18 @@ jobs:
           sample_memory() {
             while true; do
               if [ "${{ inputs.platform }}" = "ios" ]; then
-                xcrun simctl spawn "$DEVICE_ID" ps -A -o rss=,comm= 2>/dev/null \
-                  | awk -v executable="$IOS_EXECUTABLE" '$2 == executable || $2 ~ ("/" executable "$") { print $1; fflush() }' \
+                xcrun simctl spawn "$DEVICE_ID" ps -A -o rss=,command= 2>/dev/null \
+                  | awk -v executable="$IOS_EXECUTABLE" '
+                      {
+                        rss = $1
+                        $1 = ""
+                        sub(/^[[:space:]]+/, "", $0)
+                        if ($0 == executable || index($0, "/" executable) > 0) {
+                          print rss
+                          fflush()
+                        }
+                      }
+                    ' \
                   >> "$MEMORY_LOG" || true
               else
                 adb shell dumpsys meminfo "$APP_ID" 2>/dev/null \
