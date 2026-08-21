@@ -134,7 +134,7 @@ jobs:
           echo "ios_runtime=$RUNTIME"
           echo "ios_phone_type=$PHONE_TYPE"
 
-      - name: Build Android debug APK
+      - name: Build Android release APK
         if: ${{ inputs.platform == 'android' }}
         working-directory: src/${{ inputs.target }}
         env:
@@ -142,11 +142,11 @@ jobs:
         run: |
           npx expo prebuild --platform android --no-install --clean
           cd android
-          ./gradlew :app:assembleDebug --no-daemon --max-workers=2
-          APK="$PWD/app/build/outputs/apk/debug/app-debug.apk"
+          ./gradlew :app:assembleRelease --no-daemon --max-workers=2
+          APK="$PWD/app/build/outputs/apk/release/app-release.apk"
           test -f "$APK"
           echo "ANDROID_APK=$APK" >> "$GITHUB_ENV"
-          echo "debug_apk_sha256=$(sha256sum "$APK" | awk '{print $1}')"
+          echo "release_apk_sha256=$(sha256sum "$APK" | awk '{print $1}')"
 
       - name: Boot Android phone and seed Photos and Files
         if: ${{ inputs.platform == 'android' }}
