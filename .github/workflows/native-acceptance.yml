@@ -240,6 +240,28 @@ jobs:
           PEAK_KIB="$(awk 'NF && ($1 + 0) > max { max = $1 + 0 } END { print max + 0 }' "$MEMORY_LOG")"
           echo "native_peak_process_memory_kib=$PEAK_KIB"
           if [ "$FLOW_STATUS" -ne 0 ]; then
+            echo "=== native failure hierarchy ==="
+            "$HOME/.maestro/bin/maestro" --device="$DEVICE_ID" hierarchy || true
+            if [ "${{ inputs.platform }}" = "ios" ]; then
+              echo "=== iOS app process ==="
+              xcrun simctl spawn "$DEVICE_ID" ps -A -o pid=,rss=,command= \
+                | grep "$IOS_EXECUTABLE" || true
+              echo "=== iOS app log (last 15 minutes) ==="
+              xcrun simctl spawn "$DEVICE_ID" log show \
+                --last 15m \
+                --style compact \
+                --predicate "process == '$IOS_EXECUTABLE'" \
+                | tail -500 || true
+            else
+              echo "=== Android final accessibility tree ==="
+              adb shell uiautomator dump /sdcard/native-failure.xml >/dev/null || true
+              adb shell cat /sdcard/native-failure.xml | head -c 20000 || true
+              echo
+              echo "=== Android app log ==="
+              adb logcat -d -t 1200 \
+                | grep -E "AndroidRuntime|ReactNativeJS|$APP_ID" \
+                | tail -500 || true
+            fi
             exit "$FLOW_STATUS"
           fi
           test "$PEAK_KIB" -gt 0
