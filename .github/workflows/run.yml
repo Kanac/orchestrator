@@ -57,7 +57,9 @@ jobs:
         env:
           TKN: ${{ secrets.SOURCE_PAT }}
           REPO: ${{ secrets.SOURCE_REPO }}
-        run: git clone --depth 1 "https://x-access-token:${TKN}@github.com/${REPO}.git" src
+        run: |
+          git clone --depth 1 "https://x-access-token:${TKN}@github.com/${REPO}.git" src
+          echo "source_sha=$(git -C src rev-parse HEAD)"
 
       # Runners ship a current Node LTS (+ Xcode/CocoaPods on macOS), so we add NO
       # third-party actions (zero supply-chain surface). eas-cli is the only global install.
