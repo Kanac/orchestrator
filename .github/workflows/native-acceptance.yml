@@ -1,0 +1,242 @@
+name: native-acceptance
+
+# Generic, non-submitting native runtime gate. It clones the private app fleet,
+# builds a simulator/emulator binary, installs it, runs the target app's checked-in
+# Maestro flow, prints native runtime evidence, and discards the binary with the
+# ephemeral runner. No binary or source artifact is uploaded from this public repo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "target"
+        required: true
+        type: string
+      platform:
+        description: "platform"
+        required: true
+        default: ios
+        type: choice
+        options: [ios, android]
+      fixture:
+        description: "optional target-relative media fixture"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: native-acceptance-${{ inputs.target }}-${{ inputs.platform }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  job:
+    runs-on: ${{ inputs.platform == 'ios' && 'macos-26' || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    env:
+      EXPO_NO_TELEMETRY: "1"
+      MAESTRO_VERSION: "2.8.0"
+
+    steps:
+      - name: Fetch
+        env:
+          TKN: ${{ secrets.SOURCE_PAT }}
+          REPO: ${{ secrets.SOURCE_REPO }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${TKN}@github.com/${REPO}.git" src
+          echo "source_sha=$(git -C src rev-parse HEAD)"
+
+      - name: Install JavaScript dependencies
+        working-directory: src/${{ inputs.target }}
+        run: npm ci
+
+      - name: Resolve native identity
+        working-directory: src/${{ inputs.target }}
+        run: |
+          if [ "${{ inputs.platform }}" = "ios" ]; then
+            APP_ID="$(npx expo config --json | jq -r '.ios.bundleIdentifier')"
+          else
+            APP_ID="$(npx expo config --json | jq -r '.android.package')"
+          fi
+          test -n "$APP_ID"
+          test "$APP_ID" != "null"
+          echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
+          echo "app_id=$APP_ID"
+
+      - name: Install Maestro
+        run: |
+          java -version
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          "$HOME/.maestro/bin/maestro" --version
+
+      - name: Build iOS simulator app
+        if: ${{ inputs.platform == 'ios' }}
+        working-directory: src/${{ inputs.target }}
+        run: |
+          npx expo prebuild --platform ios --no-install --clean
+          pod install --project-directory=ios
+          WORKSPACE="$(find ios -maxdepth 1 -name '*.xcworkspace' -print -quit)"
+          test -n "$WORKSPACE"
+          SCHEME="$(xcodebuild -list -json -workspace "$WORKSPACE" | jq -r '.workspace.schemes | map(select(startswith("Pods-") | not)) | first')"
+          test -n "$SCHEME"
+          test "$SCHEME" != "null"
+          xcodebuild \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+          APP="$(find "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphonesimulator" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP"
+          echo "IOS_APP=$APP" >> "$GITHUB_ENV"
+          echo "simulator_app_tree_sha256=$(find "$APP" -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')"
+
+      - name: Boot iOS phone and seed Photos
+        if: ${{ inputs.platform == 'ios' }}
+        working-directory: src/${{ inputs.target }}
+        run: |
+          RUNTIME="$(xcrun simctl list runtimes --json | jq -r '[.runtimes[] | select(.isAvailable == true and (.identifier | contains("iOS")))] | sort_by(.version | split(".") | map(tonumber)) | last.identifier')"
+          PHONE_TYPE="$(xcrun simctl list devicetypes --json | jq -r '([.devicetypes[] | select(.name == "iPhone 16 Pro")] | first | .identifier) // ([.devicetypes[] | select(.name | startswith("iPhone"))] | last | .identifier)')"
+          test -n "$RUNTIME"
+          test -n "$PHONE_TYPE"
+          PHONE_UDID="$(xcrun simctl create "${{ inputs.target }}-native-phone" "$PHONE_TYPE" "$RUNTIME")"
+          xcrun simctl boot "$PHONE_UDID"
+          xcrun simctl bootstatus "$PHONE_UDID" -b
+          xcrun simctl install "$PHONE_UDID" "$IOS_APP"
+          FIXTURE="${{ inputs.fixture }}"
+          if [ -n "$FIXTURE" ]; then
+            test -f "$FIXTURE"
+            xcrun simctl addmedia "$PHONE_UDID" "$FIXTURE"
+          fi
+          echo "DEVICE_ID=$PHONE_UDID" >> "$GITHUB_ENV"
+          echo "ios_runtime=$RUNTIME"
+          echo "ios_phone_type=$PHONE_TYPE"
+
+      - name: Build Android debug APK
+        if: ${{ inputs.platform == 'android' }}
+        working-directory: src/${{ inputs.target }}
+        env:
+          GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=2g -Dorg.gradle.workers.max=2 -Dorg.gradle.daemon=false
+        run: |
+          npx expo prebuild --platform android --no-install --clean
+          cd android
+          ./gradlew :app:assembleDebug --no-daemon --max-workers=2
+          APK="$PWD/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          echo "ANDROID_APK=$APK" >> "$GITHUB_ENV"
+          echo "debug_apk_sha256=$(sha256sum "$APK" | awk '{print $1}')"
+
+      - name: Boot Android phone and seed Photos and Files
+        if: ${{ inputs.platform == 'android' }}
+        working-directory: src/${{ inputs.target }}
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "emulator" "platforms;android-34" "system-images;android-34;google_apis;x86_64"
+          echo no | avdmanager create avd --force --name native-acceptance --package "system-images;android-34;google_apis;x86_64" --device "pixel_6"
+          sudo chmod 666 /dev/kvm || true
+          nohup "$ANDROID_HOME/emulator/emulator" \
+            -avd native-acceptance \
+            -no-window \
+            -noaudio \
+            -no-boot-anim \
+            -gpu swiftshader_indirect \
+            -accel on \
+            > "$RUNNER_TEMP/android-emulator.log" 2>&1 &
+          adb wait-for-device
+          READY=0
+          for _ in $(seq 1 150); do
+            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+              READY=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$READY" != "1" ]; then
+            tail -200 "$RUNNER_TEMP/android-emulator.log"
+            exit 1
+          fi
+          adb shell input keyevent 82
+          adb install -r "$ANDROID_APK"
+          FIXTURE="${{ inputs.fixture }}"
+          if [ -n "$FIXTURE" ]; then
+            test -f "$FIXTURE"
+            adb shell mkdir -p /sdcard/Pictures /sdcard/Download
+            adb push "$FIXTURE" /sdcard/Pictures/native-acceptance-source.png
+            adb push "$FIXTURE" /sdcard/Download/native-acceptance-source.png
+            adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///sdcard/Pictures/native-acceptance-source.png
+          fi
+          echo "DEVICE_ID=$(adb get-serialno)" >> "$GITHUB_ENV"
+          echo "android_api=$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
+          echo "android_model=$(adb shell getprop ro.product.model | tr -d '\r')"
+
+      - name: Run native phone flow
+        working-directory: src/${{ inputs.target }}
+        run: |
+          FLOW=".maestro/gate-a-${{ inputs.platform }}.yaml"
+          test -f "$FLOW"
+          "$HOME/.maestro/bin/maestro" --device="$DEVICE_ID" test "$FLOW"
+          echo "native_phone_flow=PASS"
+
+      - name: Run app-specific native postchecks
+        working-directory: src/${{ inputs.target }}
+        env:
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          POST="scripts/native-acceptance-post-${{ inputs.platform }}.sh"
+          if [ -f "$POST" ]; then
+            bash "$POST"
+          else
+            echo "No app-specific postcheck at $POST"
+          fi
+
+      - name: Capture native runtime evidence
+        working-directory: src/${{ inputs.target }}
+        run: |
+          if [ "${{ inputs.platform }}" = "ios" ]; then
+            xcrun simctl io "$DEVICE_ID" screenshot "$RUNNER_TEMP/native-final.png"
+            echo "final_screenshot_sha256=$(shasum -a 256 "$RUNNER_TEMP/native-final.png" | awk '{print $1}')"
+            sips -g pixelWidth -g pixelHeight "$RUNNER_TEMP/native-final.png"
+            echo "=== iOS process memory (KiB RSS) ==="
+            xcrun simctl spawn "$DEVICE_ID" ps -A -o pid=,rss=,command= | grep "$APP_ID" || true
+          else
+            adb exec-out screencap -p > "$RUNNER_TEMP/native-final.png"
+            echo "final_screenshot_sha256=$(sha256sum "$RUNNER_TEMP/native-final.png" | awk '{print $1}')"
+            file "$RUNNER_TEMP/native-final.png"
+            echo "=== Android process memory ==="
+            adb shell dumpsys meminfo "$APP_ID" | sed -n '/App Summary/,/Objects/p'
+            echo "=== Android final accessibility tree ==="
+            adb shell uiautomator dump /sdcard/native-final.xml >/dev/null
+            adb shell cat /sdcard/native-final.xml | head -c 12000
+            echo
+          fi
+
+      - name: Run optional iOS tablet flow
+        if: ${{ inputs.platform == 'ios' }}
+        working-directory: src/${{ inputs.target }}
+        run: |
+          FLOW=".maestro/gate-a-ios-tablet.yaml"
+          if [ ! -f "$FLOW" ]; then
+            echo "No optional tablet flow at $FLOW"
+            exit 0
+          fi
+          RUNTIME="$(xcrun simctl list runtimes --json | jq -r '[.runtimes[] | select(.isAvailable == true and (.identifier | contains("iOS")))] | sort_by(.version | split(".") | map(tonumber)) | last.identifier')"
+          TABLET_TYPE="$(xcrun simctl list devicetypes --json | jq -r '([.devicetypes[] | select(.name == "iPad Pro 11-inch (M4)")] | first | .identifier) // ([.devicetypes[] | select(.name | startswith("iPad"))] | last | .identifier)')"
+          test -n "$TABLET_TYPE"
+          TABLET_UDID="$(xcrun simctl create "${{ inputs.target }}-native-tablet" "$TABLET_TYPE" "$RUNTIME")"
+          xcrun simctl boot "$TABLET_UDID"
+          xcrun simctl bootstatus "$TABLET_UDID" -b
+          xcrun simctl install "$TABLET_UDID" "$IOS_APP"
+          "$HOME/.maestro/bin/maestro" --device="$TABLET_UDID" test "$FLOW"
+          xcrun simctl io "$TABLET_UDID" screenshot "$RUNNER_TEMP/native-tablet-final.png"
+          echo "native_tablet_flow=PASS"
+          echo "tablet_screenshot_sha256=$(shasum -a 256 "$RUNNER_TEMP/native-tablet-final.png" | awk '{print $1}')"
+          sips -g pixelWidth -g pixelHeight "$RUNNER_TEMP/native-tablet-final.png"
+
+      # The runner is ephemeral. Deliberately no artifact upload: binaries and
+      # private source never leave this job; the provider-verifiable run log is
+      # the retained evidence surface.
