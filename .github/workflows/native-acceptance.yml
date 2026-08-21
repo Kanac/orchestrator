@@ -426,6 +426,41 @@ jobs:
           fi
           adb shell input keyevent 82
           adb install -r "$ANDROID_APK"
+          ANDROID_COMPONENT="$(
+            adb shell cmd package resolve-activity \
+              --brief \
+              -a android.intent.action.MAIN \
+              -c android.intent.category.LAUNCHER \
+              -p "$APP_ID" \
+              | tr -d '\r' \
+              | tail -1
+          )"
+          test -n "$ANDROID_COMPONENT"
+          case "$ANDROID_COMPONENT" in
+            *"No activity found"*) echo "$ANDROID_COMPONENT" >&2; exit 1 ;;
+          esac
+          adb logcat -c
+          set +e
+          ANDROID_PREFLIGHT_OUTPUT="$(adb shell am start -W -n "$ANDROID_COMPONENT" 2>&1)"
+          ANDROID_PREFLIGHT_STATUS=$?
+          set -e
+          echo "$ANDROID_PREFLIGHT_OUTPUT"
+          sleep 10
+          ANDROID_PREFLIGHT_PID="$(adb shell pidof "$APP_ID" 2>/dev/null | tr -d '\r' || true)"
+          if [ "$ANDROID_PREFLIGHT_STATUS" -ne 0 ] || [ -z "$ANDROID_PREFLIGHT_PID" ]; then
+            echo "Android Release app failed direct launch before Maestro"
+            echo "=== Android activity state ==="
+            adb shell dumpsys activity activities | tail -500 || true
+            echo "=== Android direct-launch log ==="
+            adb logcat -d -v threadtime -t 3000 | tail -1600 || true
+            exit 1
+          fi
+          echo "android_preflight_component=$ANDROID_COMPONENT"
+          echo "android_preflight_pid=$ANDROID_PREFLIGHT_PID"
+          echo "android_preflight_launch=PASS"
+          adb shell am force-stop "$APP_ID"
+          adb shell pm clear "$APP_ID"
+          adb logcat -c
           FIXTURE="${{ inputs.fixture }}"
           if [ -n "$FIXTURE" ]; then
             test -f "$FIXTURE"
@@ -505,9 +540,7 @@ jobs:
               adb shell cat /sdcard/native-failure.xml | head -c 20000 || true
               echo
               echo "=== Android app log ==="
-              adb logcat -d -t 1200 \
-                | grep -E "AndroidRuntime|ReactNativeJS|$APP_ID" \
-                | tail -500 || true
+              adb logcat -d -v threadtime -t 3000 | tail -1600 || true
             fi
             exit "$FLOW_STATUS"
           fi
