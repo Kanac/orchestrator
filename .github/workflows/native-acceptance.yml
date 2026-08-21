@@ -207,7 +207,9 @@ jobs:
             -no-window \
             -noaudio \
             -no-boot-anim \
-            -gpu swiftshader_indirect \
+            -no-snapshot \
+            -wipe-data \
+            -gpu swiftshader \
             -accel on \
             > "$RUNNER_TEMP/android-emulator.log" 2>&1 &
           EMULATOR_PID=$!
