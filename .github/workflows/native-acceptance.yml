@@ -76,6 +76,107 @@ jobs:
           curl -Ls "https://get.maestro.mobile.dev" | bash
           "$HOME/.maestro/bin/maestro" --version
 
+      - name: Install iOS signing identity
+        if: ${{ inputs.platform == 'ios' }}
+        working-directory: src/${{ inputs.target }}
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          EXPO_OWNER="$(npx expo config --json | jq -r '.owner')"
+          test -n "$EXPO_OWNER"
+          test "$EXPO_OWNER" != "null"
+          export EXPO_OWNER
+          node <<'NODE'
+          const { writeFileSync } = require('node:fs');
+          const { join } = require('node:path');
+
+          async function main() {
+            const variable = String.fromCharCode(36);
+            const query = `query(${variable}accountName: String!) {
+              account {
+                byName(accountName: ${variable}accountName) {
+                  appleDistributionCertificatesPaginated(first: 20) {
+                    edges {
+                      node {
+                        certificateP12
+                        certificatePassword
+                        serialNumber
+                        validityNotAfter
+                        appleTeam { appleTeamIdentifier }
+                      }
+                    }
+                  }
+                }
+              }
+            }`;
+            const response = await fetch('https://api.expo.dev/graphql', {
+              method: 'POST',
+              headers: {
+                authorization: `Bearer ${process.env.EXPO_TOKEN}`,
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify({ query, variables: { accountName: process.env.EXPO_OWNER } }),
+            });
+            const payload = await response.json();
+            if (!response.ok || payload.errors) {
+              throw new Error('Expo credentials query failed without returning a usable signing identity.');
+            }
+            const certificates = payload.data.account.byName
+              .appleDistributionCertificatesPaginated.edges
+              .map((edge) => edge.node)
+              .filter((certificate) =>
+                certificate.certificateP12 &&
+                typeof certificate.certificatePassword === 'string' &&
+                certificate.appleTeam?.appleTeamIdentifier &&
+                Date.parse(certificate.validityNotAfter) > Date.now()
+              )
+              .sort((left, right) => Date.parse(right.validityNotAfter) - Date.parse(left.validityNotAfter));
+            if (!certificates.length) throw new Error('No valid Expo-managed Apple distribution identity exists.');
+            const certificate = certificates[0];
+            const root = process.env.RUNNER_TEMP;
+            writeFileSync(join(root, 'native-distribution.p12'), Buffer.from(certificate.certificateP12, 'base64'), { mode: 0o600 });
+            writeFileSync(join(root, 'native-distribution.password'), certificate.certificatePassword, { mode: 0o600 });
+            writeFileSync(join(root, 'native-apple-team.txt'), certificate.appleTeam.appleTeamIdentifier, { mode: 0o600 });
+            writeFileSync(join(root, 'native-certificate-serial.txt'), certificate.serialNumber, { mode: 0o600 });
+          }
+
+          main().catch((error) => {
+            console.error(error.message);
+            process.exit(1);
+          });
+          NODE
+          CERTIFICATE_PASSWORD="$(cat "$RUNNER_TEMP/native-distribution.password")"
+          APPLE_TEAM_ID="$(cat "$RUNNER_TEMP/native-apple-team.txt")"
+          CERTIFICATE_SERIAL="$(cat "$RUNNER_TEMP/native-certificate-serial.txt")"
+          echo "::add-mask::$CERTIFICATE_PASSWORD"
+          SIGNING_KEYCHAIN="$RUNNER_TEMP/native-signing.keychain-db"
+          SIGNING_KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$SIGNING_KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$SIGNING_KEYCHAIN"
+          security unlock-keychain -p "$SIGNING_KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+          security import "$RUNNER_TEMP/native-distribution.p12" \
+            -k "$SIGNING_KEYCHAIN" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$SIGNING_KEYCHAIN_PASSWORD" \
+            "$SIGNING_KEYCHAIN"
+          IOS_SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$SIGNING_KEYCHAIN" | awk 'NR == 1 { print $2 }')"
+          test -n "$IOS_SIGNING_IDENTITY"
+          test "$IOS_SIGNING_IDENTITY" != "0"
+          echo "IOS_SIGNING_IDENTITY=$IOS_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          echo "IOS_SIGNING_KEYCHAIN=$SIGNING_KEYCHAIN" >> "$GITHUB_ENV"
+          echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          echo "ios_signing_team=$APPLE_TEAM_ID"
+          echo "ios_signing_certificate_serial=$CERTIFICATE_SERIAL"
+          rm -f \
+            "$RUNNER_TEMP/native-distribution.p12" \
+            "$RUNNER_TEMP/native-distribution.password" \
+            "$RUNNER_TEMP/native-apple-team.txt" \
+            "$RUNNER_TEMP/native-certificate-serial.txt"
+
       - name: Build iOS simulator app
         if: ${{ inputs.platform == 'ios' }}
         working-directory: src/${{ inputs.target }}
@@ -131,7 +232,9 @@ jobs:
           # group and would add another restricted entitlement to authorize.
           SIMULATOR_ENTITLEMENTS="$RUNNER_TEMP/native-simulator.entitlements"
           plutil -create xml1 "$SIMULATOR_ENTITLEMENTS"
-          APPLE_TEAM_ID="6CJM66G3S2"
+          test -n "$APPLE_TEAM_ID"
+          test -n "$IOS_SIGNING_IDENTITY"
+          test -f "$IOS_SIGNING_KEYCHAIN"
           /usr/libexec/PlistBuddy -c "Add :application-identifier string $APPLE_TEAM_ID.$APP_ID" "$SIMULATOR_ENTITLEMENTS"
           /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $APPLE_TEAM_ID" "$SIMULATOR_ENTITLEMENTS"
           plutil -lint "$SIMULATOR_ENTITLEMENTS"
@@ -139,14 +242,29 @@ jobs:
           # native code as a signed graph. Sign nested bundles and dylibs first
           # so the app does not die as an invalid process before JavaScript.
           while IFS= read -r -d '' NESTED_CODE; do
-            codesign --force --sign - --timestamp=none "$NESTED_CODE"
+            codesign \
+              --force \
+              --sign "$IOS_SIGNING_IDENTITY" \
+              --keychain "$IOS_SIGNING_KEYCHAIN" \
+              --timestamp=none \
+              "$NESTED_CODE"
           done < <(
             find "$APP" -depth \
               \( -type d -name '*.framework' -o -type d -name '*.appex' -o -type f -name '*.dylib' \) \
               -print0
           )
-          codesign --force --sign - --timestamp=none --entitlements "$SIMULATOR_ENTITLEMENTS" "$APP"
+          codesign \
+            --force \
+            --sign "$IOS_SIGNING_IDENTITY" \
+            --keychain "$IOS_SIGNING_KEYCHAIN" \
+            --timestamp=none \
+            --entitlements "$SIMULATOR_ENTITLEMENTS" \
+            "$APP"
           codesign --verify --deep --strict "$APP"
+          SIGNING_INFO="$(codesign --display --verbose=4 "$APP" 2>&1)"
+          echo "$SIGNING_INFO"
+          echo "$SIGNING_INFO" | grep -F "Identifier=$APP_ID"
+          echo "$SIGNING_INFO" | grep -F "TeamIdentifier=$APPLE_TEAM_ID"
           echo "=== simulator signed entitlements ==="
           codesign -d --entitlements :- "$APP" 2>&1
           echo "IOS_APP=$APP" >> "$GITHUB_ENV"
