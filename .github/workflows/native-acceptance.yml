@@ -130,10 +130,13 @@ jobs:
           # ephemeral simulator app an isolated ad-hoc identity before install.
           SIMULATOR_ENTITLEMENTS="$RUNNER_TEMP/native-simulator.entitlements"
           plutil -create xml1 "$SIMULATOR_ENTITLEMENTS"
-          /usr/libexec/PlistBuddy -c "Add :application-identifier string SIMULATOR.$APP_ID" "$SIMULATOR_ENTITLEMENTS"
-          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string SIMULATOR" "$SIMULATOR_ENTITLEMENTS"
+          # App ID prefixes are exactly ten alphanumeric characters. Keep this
+          # test-only prefix valid-format so SpringBoard accepts the signed app.
+          SIMULATOR_APP_ID_PREFIX="SIMULATOR0"
+          /usr/libexec/PlistBuddy -c "Add :application-identifier string $SIMULATOR_APP_ID_PREFIX.$APP_ID" "$SIMULATOR_ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $SIMULATOR_APP_ID_PREFIX" "$SIMULATOR_ENTITLEMENTS"
           /usr/libexec/PlistBuddy -c "Add :keychain-access-groups array" "$SIMULATOR_ENTITLEMENTS"
-          /usr/libexec/PlistBuddy -c "Add :keychain-access-groups:0 string SIMULATOR.$APP_ID" "$SIMULATOR_ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c "Add :keychain-access-groups:0 string $SIMULATOR_APP_ID_PREFIX.$APP_ID" "$SIMULATOR_ENTITLEMENTS"
           plutil -lint "$SIMULATOR_ENTITLEMENTS"
           codesign --force --sign - --timestamp=none --entitlements "$SIMULATOR_ENTITLEMENTS" "$APP"
           codesign --verify --strict "$APP"
@@ -156,6 +159,23 @@ jobs:
           xcrun simctl boot "$PHONE_UDID"
           xcrun simctl bootstatus "$PHONE_UDID" -b
           xcrun simctl install "$PHONE_UDID" "$IOS_APP"
+          set +e
+          PREFLIGHT_OUTPUT="$(xcrun simctl launch "$PHONE_UDID" "$APP_ID" 2>&1)"
+          PREFLIGHT_STATUS=$?
+          set -e
+          echo "$PREFLIGHT_OUTPUT"
+          if [ "$PREFLIGHT_STATUS" -ne 0 ]; then
+            echo "iOS simulator rejected the installed Release app before Maestro"
+            echo "=== iOS launch-service diagnostics ==="
+            xcrun simctl spawn "$PHONE_UDID" log show \
+              --last 5m \
+              --style compact \
+              --predicate 'process == "SpringBoard" OR process == "runningboardd" OR process == "launchd_sim" OR process == "securityd"' \
+              | tail -800 || true
+            exit "$PREFLIGHT_STATUS"
+          fi
+          echo "ios_preflight_launch=PASS"
+          xcrun simctl terminate "$PHONE_UDID" "$APP_ID"
           FIXTURE="${{ inputs.fixture }}"
           if [ -n "$FIXTURE" ]; then
             test -f "$FIXTURE"
