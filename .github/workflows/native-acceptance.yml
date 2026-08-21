@@ -98,8 +98,12 @@ jobs:
             CODE_SIGNING_REQUIRED=NO
           APP="$(find "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphonesimulator" -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -n "$APP"
+          IOS_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+          test -n "$IOS_EXECUTABLE"
           echo "IOS_APP=$APP" >> "$GITHUB_ENV"
+          echo "IOS_EXECUTABLE=$IOS_EXECUTABLE" >> "$GITHUB_ENV"
           echo "simulator_app_tree_sha256=$(find "$APP" -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')"
+          echo "ios_executable=$IOS_EXECUTABLE"
 
       - name: Boot iOS phone and seed Photos
         if: ${{ inputs.platform == 'ios' }}
@@ -191,7 +195,42 @@ jobs:
         run: |
           FLOW=".maestro/gate-a-${{ inputs.platform }}.yaml"
           test -f "$FLOW"
+          MEMORY_LOG="$RUNNER_TEMP/native-memory-kib.txt"
+          : > "$MEMORY_LOG"
+          sample_memory() {
+            while true; do
+              if [ "${{ inputs.platform }}" = "ios" ]; then
+                xcrun simctl spawn "$DEVICE_ID" ps -A -o rss=,command= 2>/dev/null \
+                  | awk -v executable="/$IOS_EXECUTABLE" 'index($0, executable) > 0 { print $1; fflush() }' \
+                  >> "$MEMORY_LOG" || true
+              else
+                adb shell dumpsys meminfo "$APP_ID" 2>/dev/null \
+                  | sed -n 's/.*TOTAL PSS:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+                  >> "$MEMORY_LOG" || true
+              fi
+              sleep 0.5
+            done
+          }
+          sample_memory &
+          SAMPLER_PID=$!
+          stop_sampler() {
+            kill "$SAMPLER_PID" 2>/dev/null || true
+            wait "$SAMPLER_PID" 2>/dev/null || true
+          }
+          trap stop_sampler EXIT
+          set +e
           "$HOME/.maestro/bin/maestro" --device="$DEVICE_ID" test "$FLOW"
+          FLOW_STATUS=$?
+          set -e
+          stop_sampler
+          trap - EXIT
+          PEAK_KIB="$(awk 'NF && ($1 + 0) > max { max = $1 + 0 } END { print max + 0 }' "$MEMORY_LOG")"
+          echo "native_peak_process_memory_kib=$PEAK_KIB"
+          if [ "$FLOW_STATUS" -ne 0 ]; then
+            exit "$FLOW_STATUS"
+          fi
+          test "$PEAK_KIB" -gt 0
+          test "$PEAK_KIB" -lt 184320
           echo "native_phone_flow=PASS"
 
       - name: Run app-specific native postchecks
