@@ -97,6 +97,8 @@ jobs:
           echo "ios_project=$PROJECT"
           echo "ios_scheme=$SCHEME"
           echo "ios_simulator_arch=$SIMULATOR_ARCH"
+          XCODEBUILD_LOG="$RUNNER_TEMP/native-xcodebuild.log"
+          set +e
           xcodebuild \
             -workspace "$WORKSPACE" \
             -scheme "$SCHEME" \
@@ -107,7 +109,16 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             ARCHS="$SIMULATOR_ARCH" \
-            ONLY_ACTIVE_ARCH=YES
+            ONLY_ACTIVE_ARCH=YES \
+            > "$XCODEBUILD_LOG" 2>&1
+          XCODEBUILD_STATUS=$?
+          set -e
+          if [ "$XCODEBUILD_STATUS" -ne 0 ]; then
+            tail -800 "$XCODEBUILD_LOG"
+            exit "$XCODEBUILD_STATUS"
+          fi
+          grep -E 'warning:|error:|BUILD SUCCEEDED' "$XCODEBUILD_LOG" | tail -200 || true
+          tail -20 "$XCODEBUILD_LOG"
           APP="$(find "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphonesimulator" -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -n "$APP"
           IOS_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
