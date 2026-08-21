@@ -140,9 +140,16 @@ jobs:
         if: ${{ inputs.platform == 'android' }}
         working-directory: src/${{ inputs.target }}
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "emulator" "platforms;android-34" "system-images;android-34;google_apis;x86_64"
-          echo no | avdmanager create avd --force --name native-acceptance --package "system-images;android-34;google_apis;x86_64" --device "pixel_6"
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -perm -111 -print | sort | tail -1)"
+          AVDMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name avdmanager -perm -111 -print | sort | tail -1)"
+          test -x "$SDKMANAGER"
+          test -x "$AVDMANAGER"
+          echo "sdkmanager=$SDKMANAGER"
+          echo "avdmanager=$AVDMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "emulator" "platforms;android-34" "system-images;android-34;google_apis;x86_64"
+          echo no | "$AVDMANAGER" create avd --force --name native-acceptance --package "system-images;android-34;google_apis;x86_64" --device "pixel_6"
           sudo chmod 666 /dev/kvm || true
           nohup "$ANDROID_HOME/emulator/emulator" \
             -avd native-acceptance \
