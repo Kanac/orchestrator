@@ -138,6 +138,37 @@ jobs:
             echo "ABSENT: com.google.android.gms.permission.AD_ID"
           fi
 
+      # Match Android's final-artifact observability on iOS. This inspects the signed IPA that
+      # would be submitted, without uploading the binary from this public repository. Info.plist,
+      # entitlements and bundled locale names are non-secret and let release sessions prove the
+      # binary rather than trusting app.config.js or a prebuild directory.
+      - name: iOS archive declarations
+        if: ${{ inputs.platform == 'ios' }}
+        run: |
+          IPA="$RUNNER_TEMP/out.ipa"
+          INSPECT="$RUNNER_TEMP/ios-inspect"
+          echo "sha256: $(shasum -a 256 "$IPA" | awk '{print $1}')"
+          rm -rf "$INSPECT"
+          mkdir -p "$INSPECT"
+          unzip -q "$IPA" -d "$INSPECT"
+          APP="$(find "$INSPECT/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP"
+          echo "=== resolved Info.plist ==="
+          plutil -p "$APP/Info.plist"
+          echo "=== signed entitlements ==="
+          codesign -d --entitlements :- "$APP" 2>&1 || true
+          echo "=== bundled localizations ==="
+          find "$APP" -maxdepth 1 -type d -name '*.lproj' -exec basename {} .lproj \; | sort -u
+          echo "=== purpose strings ==="
+          for KEY in NSPhotoLibraryUsageDescription NSPhotoLibraryAddUsageDescription NSCameraUsageDescription NSMicrophoneUsageDescription NSLocationWhenInUseUsageDescription NSBluetoothAlwaysUsageDescription; do
+            VALUE="$(/usr/libexec/PlistBuddy -c "Print :$KEY" "$APP/Info.plist" 2>/dev/null || true)"
+            if [ -n "$VALUE" ]; then
+              echo "$KEY=$VALUE"
+            else
+              echo "$KEY=ABSENT"
+            fi
+          done
+
       - name: Ship
         if: ${{ inputs.submit && inputs.ship_mode != 'play-replace' }}
         working-directory: src/${{ inputs.target }}
