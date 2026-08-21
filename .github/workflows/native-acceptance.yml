@@ -218,8 +218,11 @@ jobs:
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=YES \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_IDENTITY=- \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             ARCHS="$SIMULATOR_ARCH" \
             ONLY_ACTIVE_ARCH=YES \
             > "$XCODEBUILD_LOG" 2>&1
@@ -235,51 +238,22 @@ jobs:
           test -n "$APP"
           IOS_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
           test -n "$IOS_EXECUTABLE"
-          # Unsigned simulator bundles have no application identifier, so their
-          # default Keychain group is unavailable and SecureStore fails with
-          # errSecMissingEntitlement. Sign with the fleet's real Team ID and app
-          # identifier. An invented prefix is rejected by SpringBoard, while an
-          # explicit keychain-access-groups claim is unnecessary for the default
-          # group and would add another restricted entitlement to authorize.
-          SIMULATOR_ENTITLEMENTS="$RUNNER_TEMP/native-simulator.entitlements"
-          plutil -create xml1 "$SIMULATOR_ENTITLEMENTS"
-          test -n "$APPLE_TEAM_ID"
-          test -n "$IOS_SIGNING_IDENTITY"
-          test -f "$IOS_SIGNING_KEYCHAIN"
-          test -n "$IOS_SIGNING_KEYCHAIN_PASSWORD"
-          security unlock-keychain -p "$IOS_SIGNING_KEYCHAIN_PASSWORD" "$IOS_SIGNING_KEYCHAIN"
-          security list-keychains -d user -s "$IOS_SIGNING_KEYCHAIN"
-          security default-keychain -d user -s "$IOS_SIGNING_KEYCHAIN"
-          /usr/libexec/PlistBuddy -c "Add :application-identifier string $APPLE_TEAM_ID.$APP_ID" "$SIMULATOR_ENTITLEMENTS"
-          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $APPLE_TEAM_ID" "$SIMULATOR_ENTITLEMENTS"
-          plutil -lint "$SIMULATOR_ENTITLEMENTS"
-          # Once the outer app is signed, Simulator validates its embedded
-          # native code as a signed graph. Sign nested bundles and dylibs first
-          # so the app does not die as an invalid process before JavaScript.
-          while IFS= read -r -d '' NESTED_CODE; do
-            codesign \
-              --force \
-              --sign "$IOS_SIGNING_IDENTITY" \
-              --timestamp=none \
-              "$NESTED_CODE"
-          done < <(
-            find "$APP" -depth \
-              \( -type d -name '*.framework' -o -type d -name '*.appex' -o -type f -name '*.dylib' \) \
-              -print0
-          )
-          codesign \
-            --force \
-            --sign "$IOS_SIGNING_IDENTITY" \
-            --timestamp=none \
-            --entitlements "$SIMULATOR_ENTITLEMENTS" \
-            "$APP"
+          # Let Xcode create the simulator's "Sign to Run Locally" graph. It
+          # emits the simulated application identifier in both legacy and DER
+          # entitlement forms; manually applying a distribution identity leaves
+          # restricted entitlements unauthorized and taskgated kills the app.
           codesign --verify --deep --strict "$APP"
           SIGNING_INFO="$(codesign --display --verbose=4 "$APP" 2>&1)"
           echo "$SIGNING_INFO"
           echo "$SIGNING_INFO" | grep -F "Identifier=$APP_ID"
-          echo "$SIGNING_INFO" | grep -F "TeamIdentifier=$APPLE_TEAM_ID"
           echo "=== simulator signed entitlements ==="
-          codesign -d --entitlements :- "$APP" 2>&1
+          SIGNED_ENTITLEMENTS="$(codesign -d --entitlements - --xml "$APP" 2>&1)"
+          echo "$SIGNED_ENTITLEMENTS"
+          echo "$SIGNED_ENTITLEMENTS" | grep -F "$APPLE_TEAM_ID.$APP_ID"
+          echo "$SIGNED_ENTITLEMENTS" | grep -F "$APPLE_TEAM_ID"
+          DER_INFO="$(codesign --display --verbose=6 "$APP" 2>&1)"
+          echo "$DER_INFO"
+          echo "$DER_INFO" | grep -Eq -- '-7=[0-9a-f]*[1-9a-f][0-9a-f]*'
           echo "IOS_APP=$APP" >> "$GITHUB_ENV"
           echo "IOS_EXECUTABLE=$IOS_EXECUTABLE" >> "$GITHUB_ENV"
           echo "simulator_app_tree_sha256=$(find "$APP" -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')"
