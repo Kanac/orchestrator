@@ -200,6 +200,8 @@ jobs:
           test -x "$SDK_ROOT/emulator/emulator"
           echo no | "$AVDMANAGER" create avd --force --name native-acceptance --package "system-images;android-34;google_apis;x86_64" --device "pixel_6"
           sudo chmod 666 /dev/kvm || true
+          ls -l /dev/kvm || true
+          "$SDK_ROOT/emulator/emulator" -accel-check || true
           nohup "$SDK_ROOT/emulator/emulator" \
             -avd native-acceptance \
             -no-window \
@@ -208,7 +210,25 @@ jobs:
             -gpu swiftshader_indirect \
             -accel on \
             > "$RUNNER_TEMP/android-emulator.log" 2>&1 &
-          adb wait-for-device
+          EMULATOR_PID=$!
+          ADB_READY=0
+          for _ in $(seq 1 90); do
+            if [ "$(adb get-state 2>/dev/null || true)" = "device" ]; then
+              ADB_READY=1
+              break
+            fi
+            if ! kill -0 "$EMULATOR_PID" 2>/dev/null; then
+              echo "Android emulator process exited before ADB became ready"
+              tail -200 "$RUNNER_TEMP/android-emulator.log"
+              exit 1
+            fi
+            sleep 2
+          done
+          if [ "$ADB_READY" != "1" ]; then
+            echo "Android emulator did not become ADB-ready within 180 seconds"
+            tail -200 "$RUNNER_TEMP/android-emulator.log"
+            exit 1
+          fi
           READY=0
           for _ in $(seq 1 150); do
             if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
