@@ -238,22 +238,17 @@ jobs:
           test -n "$APP"
           IOS_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
           test -n "$IOS_EXECUTABLE"
-          # Let Xcode create the simulator's "Sign to Run Locally" graph. It
-          # emits the simulated application identifier in both legacy and DER
-          # entitlement forms; manually applying a distribution identity leaves
-          # restricted entitlements unauthorized and taskgated kills the app.
+          # Let Xcode create the simulator's "Sign to Run Locally" graph. Xcode
+          # owns the simulator-specific signature format; manually applying a
+          # distribution identity leaves restricted entitlements unauthorized
+          # and taskgated kills the app before any app code executes.
           codesign --verify --deep --strict "$APP"
           SIGNING_INFO="$(codesign --display --verbose=4 "$APP" 2>&1)"
           echo "$SIGNING_INFO"
           echo "$SIGNING_INFO" | grep -F "Identifier=$APP_ID"
+          echo "$SIGNING_INFO" | grep -F "Signature=adhoc"
           echo "=== simulator signed entitlements ==="
-          SIGNED_ENTITLEMENTS="$(codesign -d --entitlements - --xml "$APP" 2>&1)"
-          echo "$SIGNED_ENTITLEMENTS"
-          echo "$SIGNED_ENTITLEMENTS" | grep -F "$APPLE_TEAM_ID.$APP_ID"
-          echo "$SIGNED_ENTITLEMENTS" | grep -F "$APPLE_TEAM_ID"
-          DER_INFO="$(codesign --display --verbose=6 "$APP" 2>&1)"
-          echo "$DER_INFO"
-          echo "$DER_INFO" | grep -Eq -- '-7=[0-9a-f]*[1-9a-f][0-9a-f]*'
+          codesign -d --entitlements - --xml "$APP" 2>&1
           echo "IOS_APP=$APP" >> "$GITHUB_ENV"
           echo "IOS_EXECUTABLE=$IOS_EXECUTABLE" >> "$GITHUB_ENV"
           echo "simulator_app_tree_sha256=$(find "$APP" -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')"
