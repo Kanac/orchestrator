@@ -151,6 +151,7 @@ jobs:
           echo "::add-mask::$CERTIFICATE_PASSWORD"
           SIGNING_KEYCHAIN="$RUNNER_TEMP/native-signing.keychain-db"
           SIGNING_KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "::add-mask::$SIGNING_KEYCHAIN_PASSWORD"
           security create-keychain -p "$SIGNING_KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
           security set-keychain-settings -lut 21600 "$SIGNING_KEYCHAIN"
           security unlock-keychain -p "$SIGNING_KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
@@ -163,11 +164,21 @@ jobs:
             -s \
             -k "$SIGNING_KEYCHAIN_PASSWORD" \
             "$SIGNING_KEYCHAIN"
+          security list-keychains -d user -s "$SIGNING_KEYCHAIN"
+          security default-keychain -d user -s "$SIGNING_KEYCHAIN"
           IOS_SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$SIGNING_KEYCHAIN" | awk 'NR == 1 { print $2 }')"
           test -n "$IOS_SIGNING_IDENTITY"
           test "$IOS_SIGNING_IDENTITY" != "0"
+          cp /usr/bin/true "$RUNNER_TEMP/native-signing-smoke"
+          codesign \
+            --force \
+            --sign "$IOS_SIGNING_IDENTITY" \
+            --timestamp=none \
+            "$RUNNER_TEMP/native-signing-smoke"
+          codesign --verify --strict "$RUNNER_TEMP/native-signing-smoke"
           echo "IOS_SIGNING_IDENTITY=$IOS_SIGNING_IDENTITY" >> "$GITHUB_ENV"
           echo "IOS_SIGNING_KEYCHAIN=$SIGNING_KEYCHAIN" >> "$GITHUB_ENV"
+          echo "IOS_SIGNING_KEYCHAIN_PASSWORD=$SIGNING_KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
           echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
           echo "ios_signing_team=$APPLE_TEAM_ID"
           echo "ios_signing_certificate_serial=$CERTIFICATE_SERIAL"
@@ -235,6 +246,10 @@ jobs:
           test -n "$APPLE_TEAM_ID"
           test -n "$IOS_SIGNING_IDENTITY"
           test -f "$IOS_SIGNING_KEYCHAIN"
+          test -n "$IOS_SIGNING_KEYCHAIN_PASSWORD"
+          security unlock-keychain -p "$IOS_SIGNING_KEYCHAIN_PASSWORD" "$IOS_SIGNING_KEYCHAIN"
+          security list-keychains -d user -s "$IOS_SIGNING_KEYCHAIN"
+          security default-keychain -d user -s "$IOS_SIGNING_KEYCHAIN"
           /usr/libexec/PlistBuddy -c "Add :application-identifier string $APPLE_TEAM_ID.$APP_ID" "$SIMULATOR_ENTITLEMENTS"
           /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $APPLE_TEAM_ID" "$SIMULATOR_ENTITLEMENTS"
           plutil -lint "$SIMULATOR_ENTITLEMENTS"
@@ -245,7 +260,6 @@ jobs:
             codesign \
               --force \
               --sign "$IOS_SIGNING_IDENTITY" \
-              --keychain "$IOS_SIGNING_KEYCHAIN" \
               --timestamp=none \
               "$NESTED_CODE"
           done < <(
@@ -256,7 +270,6 @@ jobs:
           codesign \
             --force \
             --sign "$IOS_SIGNING_IDENTITY" \
-            --keychain "$IOS_SIGNING_KEYCHAIN" \
             --timestamp=none \
             --entitlements "$SIMULATOR_ENTITLEMENTS" \
             "$APP"
