@@ -468,27 +468,38 @@ jobs:
           FLOW=".maestro/gate-a-${{ inputs.platform }}.yaml"
           test -f "$FLOW"
           MEMORY_LOG="$RUNNER_TEMP/native-memory-kib.txt"
+          MEMORY_TRACE="$RUNNER_TEMP/native-memory-trace.tsv"
           : > "$MEMORY_LOG"
+          : > "$MEMORY_TRACE"
           sample_memory() {
             while true; do
+              SAMPLE_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
               if [ "${{ inputs.platform }}" = "ios" ]; then
-                ps -A -o rss=,command= 2>/dev/null \
-                  | awk -v executable="$IOS_EXECUTABLE" '
+                ps -A -o pid=,rss=,command= 2>/dev/null \
+                  | awk -v executable="$IOS_EXECUTABLE" -v memory_log="$MEMORY_LOG" -v memory_trace="$MEMORY_TRACE" -v sample_time="$SAMPLE_TIME" '
                       {
-                        rss = $1
+                        pid = $1
+                        rss = $2
                         $1 = ""
+                        $2 = ""
                         sub(/^[[:space:]]+/, "", $0)
                         if ($0 == executable || index($0, "/" executable) > 0) {
-                          print rss
+                          print rss >> memory_log
+                          print sample_time "\t" pid "\t" rss "\t" $0 >> memory_trace
                           fflush()
                         }
                       }
-                    ' \
-                  >> "$MEMORY_LOG" || true
+                    ' || true
               else
-                adb shell dumpsys meminfo "$APP_ID" 2>/dev/null \
-                  | sed -n 's/.*TOTAL PSS:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
-                  >> "$MEMORY_LOG" || true
+                ANDROID_PSS="$(
+                  adb shell dumpsys meminfo "$APP_ID" 2>/dev/null \
+                    | sed -n 's/.*TOTAL PSS:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+                    | tail -1
+                )"
+                if [ -n "$ANDROID_PSS" ]; then
+                  echo "$ANDROID_PSS" >> "$MEMORY_LOG"
+                  printf '%s\t%s\t%s\t%s\n' "$SAMPLE_TIME" "$(adb shell pidof "$APP_ID" 2>/dev/null | tr -d '\r')" "$ANDROID_PSS" "$APP_ID" >> "$MEMORY_TRACE"
+                fi
               fi
               sleep 0.5
             done
@@ -508,8 +519,14 @@ jobs:
           trap - EXIT
           PEAK_KIB="$(awk 'NF && ($1 + 0) > max { max = $1 + 0 } END { print max + 0 }' "$MEMORY_LOG")"
           SAMPLE_COUNT="$(awk 'NF { count++ } END { print count + 0 }' "$MEMORY_LOG")"
+          FINAL_KIB="$(awk 'NF { value = $1 + 0 } END { print value + 0 }' "$MEMORY_LOG")"
+          P95_KIB="$(sort -n "$MEMORY_LOG" | awk 'NF { values[++count] = $1 + 0 } END { if (!count) print 0; else print values[int((count * 95 + 99) / 100)] }')"
           echo "native_memory_sample_count=$SAMPLE_COUNT"
           echo "native_peak_process_memory_kib=$PEAK_KIB"
+          echo "native_p95_process_memory_kib=$P95_KIB"
+          echo "native_final_process_memory_kib=$FINAL_KIB"
+          echo "=== top native process-memory samples ==="
+          sort -t $'\t' -k3,3nr "$MEMORY_TRACE" | head -10 || true
           if [ "$FLOW_STATUS" -ne 0 ]; then
             echo "=== native failure hierarchy ==="
             "$HOME/.maestro/bin/maestro" --device="$DEVICE_ID" hierarchy || true
