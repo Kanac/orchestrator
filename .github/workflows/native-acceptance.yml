@@ -204,6 +204,12 @@ jobs:
         working-directory: src/${{ inputs.target }}
         run: |
           SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          # Keep avdmanager and emulator on one explicit ephemeral home. Public
+          # runners may export Android home variables that make the creator
+          # write the AVD somewhere the emulator does not search.
+          export ANDROID_USER_HOME="$RUNNER_TEMP/android-user"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
           export PATH="$SDK_ROOT/platform-tools:$SDK_ROOT/emulator:$PATH"
           echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           echo "$SDK_ROOT/emulator" >> "$GITHUB_PATH"
@@ -212,13 +218,17 @@ jobs:
           test -x "$SDKMANAGER"
           test -x "$AVDMANAGER"
           echo "android_sdk_root=$SDK_ROOT"
+          echo "android_avd_home=$ANDROID_AVD_HOME"
           echo "sdkmanager=$SDKMANAGER"
           echo "avdmanager=$AVDMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platform-tools" "emulator" "platforms;android-34" "system-images;android-34;google_apis;x86_64"
           test -x "$SDK_ROOT/platform-tools/adb"
           test -x "$SDK_ROOT/emulator/emulator"
-          echo no | "$AVDMANAGER" create avd --force --name native-acceptance --package "system-images;android-34;google_apis;x86_64" --device "pixel_6"
+          echo no | "$AVDMANAGER" create avd --force --name native-acceptance --package "system-images;android-34;google_apis;x86_64" --device "pixel_6" --path "$ANDROID_AVD_HOME/native-acceptance.avd"
+          test -f "$ANDROID_AVD_HOME/native-acceptance.ini"
+          test -d "$ANDROID_AVD_HOME/native-acceptance.avd"
+          "$SDK_ROOT/emulator/emulator" -list-avds
           sudo chmod 666 /dev/kvm || true
           ls -l /dev/kvm || true
           "$SDK_ROOT/emulator/emulator" -accel-check || true
