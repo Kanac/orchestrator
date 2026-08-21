@@ -214,8 +214,8 @@ jobs:
           sample_memory() {
             while true; do
               if [ "${{ inputs.platform }}" = "ios" ]; then
-                xcrun simctl spawn "$DEVICE_ID" ps -A -o rss=,command= 2>/dev/null \
-                  | awk -v executable="/$IOS_EXECUTABLE" 'index($0, executable) > 0 { print $1; fflush() }' \
+                xcrun simctl spawn "$DEVICE_ID" ps -A -o rss=,comm= 2>/dev/null \
+                  | awk -v executable="$IOS_EXECUTABLE" '$2 == executable || $2 ~ ("/" executable "$") { print $1; fflush() }' \
                   >> "$MEMORY_LOG" || true
               else
                 adb shell dumpsys meminfo "$APP_ID" 2>/dev/null \
@@ -239,6 +239,8 @@ jobs:
           stop_sampler
           trap - EXIT
           PEAK_KIB="$(awk 'NF && ($1 + 0) > max { max = $1 + 0 } END { print max + 0 }' "$MEMORY_LOG")"
+          SAMPLE_COUNT="$(awk 'NF { count++ } END { print count + 0 }' "$MEMORY_LOG")"
+          echo "native_memory_sample_count=$SAMPLE_COUNT"
           echo "native_peak_process_memory_kib=$PEAK_KIB"
           if [ "$FLOW_STATUS" -ne 0 ]; then
             echo "=== native failure hierarchy ==="
@@ -265,6 +267,7 @@ jobs:
             fi
             exit "$FLOW_STATUS"
           fi
+          test "$SAMPLE_COUNT" -gt 0
           test "$PEAK_KIB" -gt 0
           test "$PEAK_KIB" -lt 184320
           echo "native_phone_flow=PASS"
