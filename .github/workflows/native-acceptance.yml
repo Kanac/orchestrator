@@ -38,6 +38,7 @@ jobs:
     env:
       EXPO_NO_TELEMETRY: "1"
       MAESTRO_VERSION: "2.8.0"
+      SYANAC_NATIVE_ACCEPTANCE: "1"
 
     steps:
       - name: Fetch
@@ -78,10 +79,14 @@ jobs:
           npx expo prebuild --platform ios --no-install --clean
           pod install --project-directory=ios
           WORKSPACE="$(find ios -maxdepth 1 -name '*.xcworkspace' -print -quit)"
+          PROJECT="$(find ios -maxdepth 1 -name '*.xcodeproj' -print -quit)"
           test -n "$WORKSPACE"
-          SCHEME="$(xcodebuild -list -json -workspace "$WORKSPACE" | jq -r '.workspace.schemes | map(select(startswith("Pods-") | not)) | first')"
+          test -n "$PROJECT"
+          SCHEME="$(xcodebuild -list -json -project "$PROJECT" | jq -r '.project.schemes | first')"
           test -n "$SCHEME"
           test "$SCHEME" != "null"
+          echo "ios_project=$PROJECT"
+          echo "ios_scheme=$SCHEME"
           xcodebuild \
             -workspace "$WORKSPACE" \
             -scheme "$SCHEME" \
