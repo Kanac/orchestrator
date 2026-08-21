@@ -434,6 +434,26 @@ jobs:
           echo "android_preflight_launch=PASS"
           adb shell am force-stop "$APP_ID"
           adb shell pm clear "$APP_ID"
+          # Keep the freshly reset app transition away from the resource-heavy
+          # launcher. A cold public runner can ANR Pixel Launcher while Maestro
+          # is attaching accessibility, which blocks the app start and falsely
+          # reports a missing first screen even though the Release app survived
+          # the direct-launch probe above.
+          HOME_COMPONENT="$(
+            adb shell cmd package resolve-activity \
+              --brief \
+              -a android.intent.action.MAIN \
+              -c android.intent.category.HOME \
+              | tr -d '\r' \
+              | tail -1
+          )"
+          HOME_PACKAGE="${HOME_COMPONENT%%/*}"
+          if [ -n "$HOME_PACKAGE" ] && [ "$HOME_PACKAGE" != "$HOME_COMPONENT" ]; then
+            adb shell am force-stop "$HOME_PACKAGE" || true
+          fi
+          adb shell am start -W -a android.settings.SETTINGS >/dev/null
+          sleep 3
+          echo "android_neutral_foreground=PASS"
           adb logcat -c
           FIXTURE="${{ inputs.fixture }}"
           if [ -n "$FIXTURE" ]; then
