@@ -1,4 +1,5 @@
 name: run
+run-name: release ${{ inputs.target }} ${{ inputs.platform }} ${{ inputs.release_id || 'legacy' }}
 
 # Generic build runner. Triggered manually only. Pulls a private source tree,
 # builds it (iOS on macOS, Android on Linux), and ships it. No source and no keys
@@ -33,6 +34,11 @@ on:
         default: eas
         type: choice
         options: [eas, play-replace]
+      release_id:
+        description: "Frozen source hash ticket (required for runtime-contract apps)"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: run-${{ inputs.target }}-${{ inputs.platform }}
@@ -41,6 +47,7 @@ concurrency:
 # Least privilege: this workflow never needs to write back to this repo.
 permissions:
   contents: read
+  actions: read
 
 jobs:
   job:
@@ -60,6 +67,36 @@ jobs:
         run: |
           git clone --depth 1 "https://x-access-token:${TKN}@github.com/${REPO}.git" src
           echo "source_sha=$(git -C src rev-parse HEAD)"
+
+      # Future/new apps carry an executable Expo-runtime contract and a web-QA
+      # freeze. The release id is the hash of every native build input. One
+      # workflow run per platform may consume it; rerunning the SAME GitHub run
+      # is the only retry path for a proven pre-Build infrastructure failure.
+      # Legacy fleet apps without the contract keep their existing release path.
+      - name: Frozen universal-runtime gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          TARGET: ${{ inputs.target }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          CONTRACT="src/${TARGET}/store/runtime-contract.json"
+          node src/scripts/audit-expo-runtime.mjs "src/${TARGET}" --require-contract
+          if [ -f "$CONTRACT" ]; then
+            if [ -z "$RELEASE_ID" ]; then
+              echo "runtime-contract app requires release_id from scripts/new-app-release.mjs"
+              exit 1
+            fi
+            node src/scripts/new-app-release.mjs verify "$TARGET" --release-id "$RELEASE_ID" --platform "$PLATFORM" --ci
+            TITLE="release ${TARGET} ${PLATFORM} ${RELEASE_ID}"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/run.yml/runs?event=workflow_dispatch&per_page=100" > "$RUNNER_TEMP/release-runs.json"
+            WINNER="$(jq --arg title "$TITLE" --argjson current "$GITHUB_RUN_ID" '([.workflow_runs[] | select(.display_title == $title) | .id] + [$current]) | min' "$RUNNER_TEMP/release-runs.json")"
+            if [ "$WINNER" -ne "$GITHUB_RUN_ID" ]; then
+              echo "one-build budget already consumed for ${TARGET}/${PLATFORM}/${RELEASE_ID}"
+              echo "A native harness/selector/timing failure never authorizes another dispatch."
+              exit 1
+            fi
+          fi
 
       # Runners ship a current Node LTS (+ Xcode/CocoaPods on macOS), so we add NO
       # third-party actions (zero supply-chain surface). eas-cli is the only global install.
