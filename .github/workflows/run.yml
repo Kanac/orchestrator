@@ -126,7 +126,8 @@ jobs:
         working-directory: src/${{ inputs.target }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: node ../scripts/audit-revenuecat-release.mjs . --platform "${{ inputs.platform }}" --environment "${{ inputs.profile }}"
+          DISPATCH_ID: ${{ inputs.dispatch_id }}
+        run: node ../scripts/audit-revenuecat-release.mjs . --platform "${{ inputs.platform }}" --environment "${{ inputs.profile }}" --dispatch-id "$DISPATCH_ID"
 
       # Materialize the store key the checked-in eas.json expects (../credentials/…),
       # picking the right one per platform. Only the relevant secret is written.
