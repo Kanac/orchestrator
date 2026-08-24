@@ -119,6 +119,15 @@ jobs:
         working-directory: src/${{ inputs.target }}
         run: npm ci
 
+      # Monetized native builds must agree at three independent boundaries:
+      # fail-closed source, a fresh live provider proof, and the selected EAS
+      # environment. The source-owned tool prints no SDK key values.
+      - name: RevenueCat release gate
+        working-directory: src/${{ inputs.target }}
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: node ../scripts/audit-revenuecat-release.mjs . --platform "${{ inputs.platform }}" --environment "${{ inputs.profile }}"
+
       # Materialize the store key the checked-in eas.json expects (../credentials/…),
       # picking the right one per platform. Only the relevant secret is written.
       - name: Key
@@ -178,6 +187,17 @@ jobs:
         run: |
           AAB="$RUNNER_TEMP/out.aab"
           echo "sha256: $(sha256sum "$AAB" | cut -d' ' -f1)"
+          if grep -q '"react-native-purchases"' "src/${{ inputs.target }}/package.json"; then
+            RC_INSPECT="$RUNNER_TEMP/android-revenuecat-inspect"
+            rm -rf "$RC_INSPECT"
+            mkdir -p "$RC_INSPECT"
+            unzip -q "$AAB" -d "$RC_INSPECT"
+            if ! grep -RaqE 'goog_[A-Za-z0-9]+' "$RC_INSPECT"; then
+              echo "BLOCKED: signed AAB does not contain a RevenueCat Android public key"
+              exit 1
+            fi
+            echo "PASS: signed AAB contains the RevenueCat Android public key marker"
+          fi
           echo "=== base manifest permissions ==="
           unzip -p "$AAB" base/manifest/AndroidManifest.xml \
             | grep -aoE '(android|com\.[a-z0-9.]+)\.permission\.[A-Za-z0-9_]+' \
@@ -204,6 +224,13 @@ jobs:
           unzip -q "$IPA" -d "$INSPECT"
           APP="$(find "$INSPECT/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -n "$APP"
+          if grep -q '"react-native-purchases"' "src/${{ inputs.target }}/package.json"; then
+            if ! grep -RaqE 'appl_[A-Za-z0-9]+' "$APP"; then
+              echo "BLOCKED: signed IPA does not contain a RevenueCat iOS public key"
+              exit 1
+            fi
+            echo "PASS: signed IPA contains the RevenueCat iOS public key marker"
+          fi
           echo "=== resolved Info.plist ==="
           plutil -p "$APP/Info.plist"
           echo "=== signed entitlements ==="
