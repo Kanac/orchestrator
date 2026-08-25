@@ -136,6 +136,20 @@ jobs:
           DISPATCH_ID: ${{ inputs.dispatch_id }}
         run: node ../scripts/audit-revenuecat-release.mjs . --platform "${{ inputs.platform }}" --environment "${{ inputs.profile }}" --dispatch-id "$DISPATCH_ID"
 
+      # `eas build --local` creates another local Git clone before compiling. A
+      # partial clone cannot serve that operation because its omitted fleet blobs
+      # are still promised by the private remote. After every source/provider gate
+      # has inspected the real commit, turn the selected sparse worktree into a
+      # complete temporary repository containing only this build's files.
+      - name: Materialize scoped build repository
+        run: |
+          mv src/.git "$RUNNER_TEMP/source-git"
+          git -C src init
+          git -C src config user.name "Syanac release runner"
+          git -C src config user.email "release-runner@users.noreply.github.com"
+          git -C src add -A
+          git -C src commit -m "Materialize scoped source snapshot"
+
       # Materialize the store key the checked-in eas.json expects (../credentials/…),
       # picking the right one per platform. Only the relevant secret is written.
       - name: Key
