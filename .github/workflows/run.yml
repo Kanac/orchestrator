@@ -80,6 +80,11 @@ jobs:
           git -C src sparse-checkout set "$TARGET" scripts config
           echo "source_sha=$(git -C src rev-parse HEAD)"
 
+      - name: Scoped checkout gate
+        env:
+          TARGET: ${{ inputs.target }}
+        run: node src/scripts/audit-orchestrator-checkout-scope.mjs "$TARGET"
+
       # Future/new apps carry an executable Expo-runtime contract and a web-QA
       # freeze. The release id is the hash of every native build input. Each
       # intentional dispatch has a unique idempotency ticket; rerunning the SAME
