@@ -63,7 +63,7 @@ jobs:
     runs-on: ${{ inputs.platform == 'ios' && 'macos-26' || 'ubuntu-latest' }}
     timeout-minutes: 90
     steps:
-      # Clone only the selected app plus the shared release tooling. The fleet's
+      # Clone only the selected app plus the shared release tooling/config. The fleet's
       # current snapshot is >1 GiB; a full checkout can leave both macOS and Linux
       # runners stuck in pack transfer long before the actual build begins.
       # SOURCE_REPO (owner/name) is itself a secret, so the YAML names nothing.
@@ -77,7 +77,7 @@ jobs:
             ''|*[!A-Za-z0-9_-]*) echo "invalid target: $TARGET"; exit 1 ;;
           esac
           git clone --depth 1 --filter=blob:none --sparse "https://x-access-token:${TKN}@github.com/${REPO}.git" src
-          git -C src sparse-checkout set "$TARGET" scripts
+          git -C src sparse-checkout set "$TARGET" scripts config
           echo "source_sha=$(git -C src rev-parse HEAD)"
 
       # Future/new apps carry an executable Expo-runtime contract and a web-QA
