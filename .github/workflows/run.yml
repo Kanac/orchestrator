@@ -44,6 +44,11 @@ on:
         required: false
         default: ""
         type: string
+      preflight_only:
+        description: "Prove workflow-dispatch authority without source checkout, credentials, build, artifact, or submission"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   # Intentional dispatches with the same immutable ticket share one queue key,
@@ -64,7 +69,24 @@ permissions:
   actions: read
 
 jobs:
+  preflight:
+    if: ${{ inputs.preflight_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Exact no-build dispatch acknowledgement
+        env:
+          PREFLIGHT_DISPATCH_ID: ${{ inputs.dispatch_id }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PREFLIGHT_DISPATCH_ID" =~ ^readiness-[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid readiness dispatch id"
+            exit 1
+          fi
+          printf 'ORCHESTRATOR_READINESS_ACK {"schemaVersion":1,"dispatchId":"%s","noBuild":true}\n' "$PREFLIGHT_DISPATCH_ID"
+
   job:
+    if: ${{ !inputs.preflight_only }}
     # iOS must build on macOS; Android builds on Linux (faster). Both are free on a public repo.
     # iOS pins macos-26 (Xcode 26.5 default): Apple's iOS-26-SDK upload gate (live 2026-07-11)
     # rejects Xcode-16 binaries, and `eas build --local` uses the RUNNER's Xcode (eas.json image
