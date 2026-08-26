@@ -46,7 +46,16 @@ on:
         type: string
 
 concurrency:
-  group: run-${{ inputs.target }}-${{ inputs.platform }}
+  # Intentional dispatches with the same immutable ticket share one queue key,
+  # so GitHub serializes exact duplicates before the API list can become
+  # eventually consistent. Different evidence-backed tickets may proceed in
+  # parallel; legacy dispatches without a ticket retain the historical
+  # target/platform queue. The frozen-gate minimum-run check below remains the
+  # canonical duplicate guard when a prior run is visible.
+  group: >-
+    ${{ inputs.dispatch_id != '' &&
+      format('run-{0}-{1}-dispatch-{2}', inputs.target, inputs.platform, inputs.dispatch_id) ||
+      format('run-{0}-{1}', inputs.target, inputs.platform) }}
   cancel-in-progress: false
 
 # Least privilege: this workflow never needs to write back to this repo.
@@ -62,10 +71,43 @@ jobs:
     # pins don't apply to --local). macos-latest still resolves to macOS 15 / Xcode 16.
     runs-on: ${{ inputs.platform == 'ios' && 'macos-26' || 'ubuntu-latest' }}
     timeout-minutes: 90
+    env:
+      MILESTONE_TARGET: ${{ inputs.target }}
+      MILESTONE_PLATFORM: ${{ inputs.platform }}
+      MILESTONE_RELEASE_ID: ${{ inputs.release_id }}
+      MILESTONE_DISPATCH_ID: ${{ inputs.dispatch_id }}
     steps:
+      # Every milestone is JSONL so the log and final job summary can be parsed
+      # without exposing source, credentials, or the private binary.
+      - name: "Milestone: checkout started"
+        run: |
+          set -euo pipefail
+          MILESTONES="$RUNNER_TEMP/orchestrator-milestones.jsonl"
+          EMITTER="$RUNNER_TEMP/orchestrator-emit-milestone.sh"
+          : > "$MILESTONES"
+          cat > "$EMITTER" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          phase="$1"
+          status="$2"
+          milestone="$(jq -cn \
+            --arg phase "$phase" --arg status "$status" \
+            --arg target "$MILESTONE_TARGET" --arg platform "$MILESTONE_PLATFORM" \
+            --arg releaseId "$MILESTONE_RELEASE_ID" --arg dispatchId "$MILESTONE_DISPATCH_ID" \
+            --arg runId "$GITHUB_RUN_ID" \
+            '{schema:"kanac.orchestrator.milestone/v1",phase:$phase,status:$status,target:$target,platform:$platform,releaseId:(if $releaseId == "" then null else $releaseId end),dispatchId:(if $dispatchId == "" then null else $dispatchId end),runId:$runId} | with_entries(select(.value != null))')"
+          printf 'ORCHESTRATOR_MILESTONE %s\n' "$milestone"
+          printf '%s\n' "$milestone" >> "$ORCHESTRATOR_MILESTONES"
+          EOF
+          chmod +x "$EMITTER"
+          export ORCHESTRATOR_MILESTONES="$MILESTONES"
+          "$EMITTER" checkout started
+          printf 'ORCHESTRATOR_MILESTONES=%s\nORCHESTRATOR_MILESTONE_EMITTER=%s\n' "$MILESTONES" "$EMITTER" >> "$GITHUB_ENV"
+
       # Clone only the selected app plus the shared release tooling/config. The fleet's
       # current snapshot is >1 GiB; a full checkout can leave both macOS and Linux
-      # runners stuck in pack transfer long before the actual build begins.
+      # runners stuck in pack transfer long before the actual build begins. The PRIVATE
+      # source uses a read-only, single-repo token.
       # SOURCE_REPO (owner/name) is itself a secret, so the YAML names nothing.
       - name: Fetch
         env:
@@ -85,6 +127,9 @@ jobs:
           TARGET: ${{ inputs.target }}
         run: node src/scripts/audit-orchestrator-checkout-scope.mjs "$TARGET"
 
+      - name: "Milestone: checkout complete"
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" checkout complete'
+
       # Future/new apps carry an executable Expo-runtime contract and a web-QA
       # freeze. The release id is the hash of every native build input. Each
       # intentional dispatch has a unique idempotency ticket; rerunning the SAME
@@ -92,6 +137,9 @@ jobs:
       # failure. A later evidence-backed dispatch gets a new ticket instead of
       # being blocked by an arbitrary numeric build cap.
       # Legacy fleet apps without the contract keep their existing release path.
+      - name: "Milestone: frozen-gate started"
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" frozen-gate started'
+
       - name: Frozen universal-runtime gate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -113,8 +161,17 @@ jobs:
             fi
             node src/scripts/new-app-release.mjs verify "$TARGET" --release-id "$RELEASE_ID" --platform "$PLATFORM" --ci
             TITLE="release ${TARGET} ${PLATFORM} ${DISPATCH_ID}"
-            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/run.yml/runs?event=workflow_dispatch&per_page=100" > "$RUNNER_TEMP/release-runs.json"
-            WINNER="$(jq --arg title "$TITLE" --argjson current "$GITHUB_RUN_ID" '([.workflow_runs[] | select(.display_title == $title) | .id] + [$current]) | min' "$RUNNER_TEMP/release-runs.json")"
+            : > "$RUNNER_TEMP/release-runs.jsonl"
+            for PAGE in $(seq 1 10); do
+              PAGE_JSON="$RUNNER_TEMP/release-runs-${PAGE}.json"
+              gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/run.yml/runs?event=workflow_dispatch&per_page=100&page=${PAGE}" > "$PAGE_JSON"
+              jq -c '.workflow_runs[]' "$PAGE_JSON" >> "$RUNNER_TEMP/release-runs.jsonl"
+              COUNT="$(jq '.workflow_runs | length' "$PAGE_JSON")"
+              if [ "$COUNT" -lt 100 ]; then
+                break
+              fi
+            done
+            WINNER="$(jq -s --arg title "$TITLE" --argjson current "$GITHUB_RUN_ID" '([.[] | select(.display_title == $title) | .id] + [$current]) | min' "$RUNNER_TEMP/release-runs.jsonl")"
             if [ "$WINNER" -ne "$GITHUB_RUN_ID" ]; then
               echo "dispatch ticket already consumed for ${TARGET}/${PLATFORM}/${DISPATCH_ID}"
               echo "Use the existing run for infrastructure retry; a later intentional dispatch needs a fresh evidence-backed ticket."
@@ -122,14 +179,23 @@ jobs:
             fi
           fi
 
+      - name: "Milestone: frozen-gate complete"
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" frozen-gate complete'
+
       # Runners ship a current Node LTS (+ Xcode/CocoaPods on macOS), so we add NO
       # third-party actions (zero supply-chain surface). eas-cli is the only global install.
+      - name: "Milestone: toolchain started"
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" toolchain started'
+
       - name: Toolchain
         run: npm install -g eas-cli
 
       - name: Install
         working-directory: src/${{ inputs.target }}
         run: npm ci
+
+      - name: "Milestone: toolchain complete"
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" toolchain complete'
 
       # Monetized native builds must agree at three independent boundaries:
       # fail-closed source, a fresh live provider proof, and the selected EAS
@@ -190,6 +256,9 @@ jobs:
       # a one-off interactive `eas build` on a machine). Key/issuer ids are
       # identifiers, not secrets — useless without the .p8, which stays sealed.
       # No-ops for Android and for apps whose credentials already exist.
+      - name: "Milestone: build started"
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" build started'
+
       - name: Build
         working-directory: src/${{ inputs.target }}
         env:
@@ -201,6 +270,12 @@ jobs:
           EXPO_APPLE_TEAM_ID: 6CJM66G3S2
           EXPO_APPLE_TEAM_TYPE: INDIVIDUAL
         run: eas build --platform "${{ inputs.platform }}" --profile "${{ inputs.profile }}" --local --non-interactive --output "$RUNNER_TEMP/out.${{ inputs.platform == 'ios' && 'ipa' || 'aab' }}"
+
+      - name: "Milestone: build complete"
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" build complete'
+
+      - name: "Milestone: artifact started"
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" artifact started'
 
       # Log the FINAL Android AAB's base-manifest permissions (the artifact Google Play
       # actually validates), plus its sha256 so the submitted binary is provably the one
@@ -274,6 +349,13 @@ jobs:
             fi
           done
 
+      - name: "Milestone: artifact complete"
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" artifact complete'
+
+      - name: "Milestone: ship started"
+        if: ${{ inputs.submit && (inputs.ship_mode != 'play-replace' || inputs.platform == 'android') }}
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" ship started'
+
       - name: Ship
         if: ${{ inputs.submit && inputs.ship_mode != 'play-replace' }}
         working-directory: src/${{ inputs.target }}
@@ -290,6 +372,39 @@ jobs:
         if: ${{ inputs.submit && inputs.ship_mode == 'play-replace' && inputs.platform == 'android' }}
         working-directory: src/${{ inputs.target }}
         run: node ../scripts/play-replace-release.mjs "$RUNNER_TEMP/out.aab" production,internal
+
+      - name: "Milestone: ship complete"
+        if: ${{ inputs.submit && (inputs.ship_mode != 'play-replace' || inputs.platform == 'android') }}
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" ship complete'
+
+      - name: "Milestone: ship skipped"
+        if: ${{ !inputs.submit || (inputs.ship_mode == 'play-replace' && inputs.platform != 'android') }}
+        run: '"$ORCHESTRATOR_MILESTONE_EMITTER" ship skipped'
+
+      - name: Milestone summary
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          MILESTONES="$RUNNER_TEMP/orchestrator-milestones.jsonl"
+          if [ ! -f "$MILESTONES" ]; then
+            : > "$MILESTONES"
+          fi
+          if [ "$JOB_STATUS" = failure ] || [ "$JOB_STATUS" = cancelled ]; then
+            LAST_PHASE="$(tail -n 1 "$MILESTONES" | jq -r '.phase // ""')"
+            LAST_STATUS="$(tail -n 1 "$MILESTONES" | jq -r '.status // ""')"
+            if { [ "$LAST_PHASE" != ship ] || { [ "$LAST_STATUS" != complete ] && [ "$LAST_STATUS" != skipped ]; }; } \
+              && [ -x "$RUNNER_TEMP/orchestrator-emit-milestone.sh" ]; then
+              ORCHESTRATOR_MILESTONES="$MILESTONES" "$RUNNER_TEMP/orchestrator-emit-milestone.sh" terminal "$JOB_STATUS"
+            fi
+          fi
+          {
+            printf '## Orchestrator milestones\n\n'
+            printf '```jsonl\n'
+            cat "$MILESTONES"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # NOTE: deliberately NO artifact upload. On a public repo, artifacts are
       # downloadable by anyone — uploading the binary would leak the build. It goes
