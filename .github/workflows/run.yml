@@ -28,6 +28,11 @@ on:
         required: true
         default: true
         type: boolean
+      wait_for_submission:
+        description: "Wait for store delivery (false only for legacy iOS with an independent ASC observer)"
+        required: false
+        default: true
+        type: boolean
       ship_mode:
         description: "ship_mode"
         required: false
@@ -383,7 +388,32 @@ jobs:
         working-directory: src/${{ inputs.target }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: eas submit --platform "${{ inputs.platform }}" --profile "${{ inputs.profile }}" --path "$RUNNER_TEMP/out.${{ inputs.platform == 'ios' && 'ipa' || 'aab' }}" --non-interactive
+          SUBMIT_PLATFORM: ${{ inputs.platform }}
+          SUBMIT_PROFILE: ${{ inputs.profile }}
+          WAIT_FOR_SUBMISSION: ${{ inputs.wait_for_submission }}
+        run: |
+          set -euo pipefail
+          args=(--platform "$SUBMIT_PLATFORM" --profile "$SUBMIT_PROFILE" --non-interactive)
+          if [ "$SUBMIT_PLATFORM" = ios ]; then
+            args+=(--path "$RUNNER_TEMP/out.ipa")
+          else
+            args+=(--path "$RUNNER_TEMP/out.aab")
+          fi
+          case "$WAIT_FOR_SUBMISSION" in
+            true) ;;
+            false)
+              if [ "$SUBMIT_PLATFORM" != ios ] || [ -f store/runtime-contract.json ]; then
+                echo "Detached submission requires legacy iOS and an independent ASC observer"
+                exit 1
+              fi
+              args+=(--no-wait)
+              ;;
+            *) echo "Invalid submission wait policy"; exit 1 ;;
+          esac
+          eas submit "${args[@]}"
+          if [ "$WAIT_FOR_SUBMISSION" = false ]; then
+            echo "Submission queued remotely; store delivery and review are NOT yet verified"
+          fi
 
       # Alternate Android ship: upload the AAB and make it the SOLE release on the target
       # track(s) via the androidpublisher API (scripts/play-replace-release.mjs), instead of
@@ -396,7 +426,7 @@ jobs:
         run: node ../scripts/play-replace-release.mjs "$RUNNER_TEMP/out.aab" production,internal
 
       - name: "Milestone: ship complete"
-        if: ${{ inputs.submit && (inputs.ship_mode != 'play-replace' || inputs.platform == 'android') }}
+        if: ${{ inputs.submit && (inputs.ship_mode == 'play-replace' && inputs.platform == 'android' || inputs.ship_mode != 'play-replace' && inputs.wait_for_submission) }}
         run: '"$ORCHESTRATOR_MILESTONE_EMITTER" ship complete'
 
       - name: "Milestone: ship skipped"
