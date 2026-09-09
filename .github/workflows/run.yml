@@ -39,6 +39,11 @@ on:
         default: eas
         type: choice
         options: [eas, play-replace, asc-direct]
+      maven_mirror:
+        description: "Use Google's Maven Central mirror after verifying an upstream artifact outage and matching checksum"
+        required: false
+        default: false
+        type: boolean
       release_id:
         description: "Frozen source hash ticket (required for runtime-contract apps)"
         required: false
@@ -321,6 +326,8 @@ jobs:
           EXPO_ASC_ISSUER_ID: a519b1df-17b1-4173-b1dc-f51d0d0aec8d
           EXPO_APPLE_TEAM_ID: 6CJM66G3S2
           EXPO_APPLE_TEAM_TYPE: INDIVIDUAL
+          # React Native's supported Maven repository override; checksum checks remain active.
+          ENTERPRISE_REPOSITORY: ${{ inputs.maven_mirror && 'https://maven-central.storage-download.googleapis.com/maven2' || '' }}
         run: eas build --platform "${{ inputs.platform }}" --profile "${{ inputs.profile }}" --local --non-interactive --output "$RUNNER_TEMP/out.${{ inputs.platform == 'ios' && 'ipa' || 'aab' }}"
 
       - name: "Milestone: build complete"
