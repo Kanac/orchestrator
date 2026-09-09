@@ -44,6 +44,11 @@ on:
         required: false
         default: ""
         type: string
+      source_commit:
+        description: "Optional immutable 40-character source commit; frozen source gate still applies"
+        required: false
+        default: ""
+        type: string
       dispatch_id:
         description: "Unique idempotency ticket for this intentional dispatch"
         required: false
@@ -141,11 +146,20 @@ jobs:
           TKN: ${{ secrets.SOURCE_PAT }}
           REPO: ${{ secrets.SOURCE_REPO }}
           TARGET: ${{ inputs.target }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           case "$TARGET" in
             ''|*[!A-Za-z0-9_-]*) echo "invalid target: $TARGET"; exit 1 ;;
           esac
           git clone --depth 1 --filter=blob:none --sparse "https://x-access-token:${TKN}@github.com/${REPO}.git" src
+          if [ -n "$SOURCE_COMMIT" ]; then
+            if ! [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "source_commit must be an immutable 40-character lowercase Git SHA"; exit 1
+            fi
+            git -C src fetch --depth 1 origin "$SOURCE_COMMIT"
+            git -C src checkout --detach "$SOURCE_COMMIT"
+            test "$(git -C src rev-parse HEAD)" = "$SOURCE_COMMIT"
+          fi
           git -C src sparse-checkout set "$TARGET" scripts config
           echo "source_sha=$(git -C src rev-parse HEAD)"
 
