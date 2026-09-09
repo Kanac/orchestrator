@@ -38,7 +38,7 @@ on:
         required: false
         default: eas
         type: choice
-        options: [eas, play-replace]
+        options: [eas, play-replace, asc-direct]
       release_id:
         description: "Frozen source hash ticket (required for runtime-contract apps)"
         required: false
@@ -109,6 +109,17 @@ jobs:
       MILESTONE_RELEASE_ID: ${{ inputs.release_id }}
       MILESTONE_DISPATCH_ID: ${{ inputs.dispatch_id }}
     steps:
+      - name: Validate ship platform
+        env:
+          SHIP_MODE: ${{ inputs.ship_mode }}
+          BUILD_PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          case "$SHIP_MODE:$BUILD_PLATFORM" in
+            eas:ios|eas:android|play-replace:android|asc-direct:ios) ;;
+            *) echo "Unsupported ship mode/platform pair"; exit 1 ;;
+          esac
+
       # Every milestone is JSONL so the log and final job summary can be parsed
       # without exposing source, credentials, or the private binary.
       - name: "Milestone: checkout started"
@@ -398,7 +409,7 @@ jobs:
         run: '"$ORCHESTRATOR_MILESTONE_EMITTER" ship started'
 
       - name: Ship
-        if: ${{ inputs.submit && inputs.ship_mode != 'play-replace' }}
+        if: ${{ inputs.submit && inputs.ship_mode == 'eas' }}
         working-directory: src/${{ inputs.target }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -429,6 +440,25 @@ jobs:
             echo "Submission queued remotely; store delivery and review are NOT yet verified"
           fi
 
+      # Opt-in delivery recovery when Expo's submission queue is stalled. Apple's
+      # bundled uploader sends the same verified IPA directly; no public artifact
+      # is created. Upload acceptance still requires an independent ASC build read-back.
+      - name: Ship (asc-direct)
+        if: ${{ inputs.submit && inputs.ship_mode == 'asc-direct' && inputs.platform == 'ios' }}
+        working-directory: src/${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          KEY_DIR="$HOME/private_keys"
+          KEY_FILE="$KEY_DIR/AuthKey_2D57UQV7B2.p8"
+          test ! -e "$KEY_FILE"
+          mkdir -p "$KEY_DIR"
+          install -m 600 ../credentials/AuthKey_2D57UQV7B2.p8 "$KEY_FILE"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          xcrun altool --upload-app --file "$RUNNER_TEMP/out.ipa" --type ios \
+            --apiKey 2D57UQV7B2 --apiIssuer a519b1df-17b1-4173-b1dc-f51d0d0aec8d \
+            --output-format xml
+          echo "Apple accepted the upload; processing and App Review still require ASC read-back"
+
       # Alternate Android ship: upload the AAB and make it the SOLE release on the target
       # track(s) via the androidpublisher API (scripts/play-replace-release.mjs), instead of
       # fastlane supply. Needed to supersede a stuck bundle that fastlane would retain in the
@@ -440,7 +470,7 @@ jobs:
         run: node ../scripts/play-replace-release.mjs "$RUNNER_TEMP/out.aab" production,internal
 
       - name: "Milestone: ship complete"
-        if: ${{ inputs.submit && (inputs.ship_mode == 'play-replace' && inputs.platform == 'android' || inputs.ship_mode != 'play-replace' && inputs.wait_for_submission) }}
+        if: ${{ inputs.submit && (inputs.ship_mode == 'play-replace' && inputs.platform == 'android' || inputs.ship_mode == 'asc-direct' && inputs.platform == 'ios' || inputs.ship_mode == 'eas' && inputs.wait_for_submission) }}
         run: '"$ORCHESTRATOR_MILESTONE_EMITTER" ship complete'
 
       - name: "Milestone: ship skipped"
