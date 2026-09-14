@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import {spawnSync} from 'node:child_process';
 import assert from 'node:assert/strict';
 const workflow=readFileSync(new URL('../.github/workflows/run.yml',import.meta.url),'utf8');
-const ship=workflow.split('      - name: Ship\n')[1].split('      # Alternate Android ship:')[0];
+const ship=workflow.split('      - name: Ship\n')[1].split('      - name:')[0];
 const run=ship.split('        run: |\n')[1].split('\n').map(line=>line.startsWith('          ')?line.slice(10):line).join('\n');
 assert.ok(run.includes('eas submit'), 'test executes the actual workflow Ship body');
 const complete=workflow.split('      - name: "Milestone: ship complete"')[1].split('      - name:')[0];

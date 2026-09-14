@@ -38,7 +38,7 @@ on:
         required: false
         default: eas
         type: choice
-        options: [eas, play-replace, asc-direct]
+        options: [eas, play-replace, play-combined, asc-direct]
       maven_mirror:
         description: "Use Google's Maven Central mirror after verifying an upstream artifact outage and matching checksum"
         required: false
@@ -121,7 +121,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$SHIP_MODE:$BUILD_PLATFORM" in
-            eas:ios|eas:android|play-replace:android|asc-direct:ios) ;;
+            eas:ios|eas:android|play-replace:android|play-combined:android|asc-direct:ios) ;;
             *) echo "Unsupported ship mode/platform pair"; exit 1 ;;
           esac
 
@@ -476,8 +476,22 @@ jobs:
         working-directory: src/${{ inputs.target }}
         run: node ../scripts/play-replace-release.mjs "$RUNNER_TEMP/out.aab" production,internal
 
+      # A complete Android release can require listings and the final AAB in one
+      # edit. Keep the private artifact on this runner until that atomic commit;
+      # submit=false would discard it and force another build.
+      - name: Ship (play-combined)
+        if: ${{ inputs.submit && inputs.ship_mode == 'play-combined' && inputs.platform == 'android' }}
+        working-directory: src/${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          RELEASE_NAME="$(node -p 'require("./app.json").expo.version')"
+          test -n "$RELEASE_NAME"
+          test "$RELEASE_NAME" != undefined
+          node ../scripts/play-replace-release.mjs "$RUNNER_TEMP/out.aab" production,internal \
+            --with-listings --name "$RELEASE_NAME" --notes-file --submit
+
       - name: "Milestone: ship complete"
-        if: ${{ inputs.submit && (inputs.ship_mode == 'play-replace' && inputs.platform == 'android' || inputs.ship_mode == 'asc-direct' && inputs.platform == 'ios' || inputs.ship_mode == 'eas' && inputs.wait_for_submission) }}
+        if: ${{ inputs.submit && ((inputs.ship_mode == 'play-replace' || inputs.ship_mode == 'play-combined') && inputs.platform == 'android' || inputs.ship_mode == 'asc-direct' && inputs.platform == 'ios' || inputs.ship_mode == 'eas' && inputs.wait_for_submission) }}
         run: '"$ORCHESTRATOR_MILESTONE_EMITTER" ship complete'
 
       - name: "Milestone: ship skipped"
