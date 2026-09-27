@@ -39,6 +39,11 @@ on:
         default: eas
         type: choice
         options: [eas, play-replace, play-combined, asc-direct]
+      play_stage_only:
+        description: "Stage Android play-replace changes for a later explicit Console review submission"
+        required: false
+        default: false
+        type: boolean
       maven_mirror:
         description: "Use Google's Maven Central mirror after verifying an upstream artifact outage and matching checksum"
         required: false
@@ -118,11 +123,22 @@ jobs:
         env:
           SHIP_MODE: ${{ inputs.ship_mode }}
           BUILD_PLATFORM: ${{ inputs.platform }}
+          PLAY_STAGE_ONLY: ${{ inputs.play_stage_only }}
         run: |
           set -euo pipefail
           case "$SHIP_MODE:$BUILD_PLATFORM" in
             eas:ios|eas:android|play-replace:android|play-combined:android|asc-direct:ios) ;;
             *) echo "Unsupported ship mode/platform pair"; exit 1 ;;
+          esac
+          case "$PLAY_STAGE_ONLY" in
+            false) ;;
+            true)
+              if [ "$SHIP_MODE:$BUILD_PLATFORM" != play-replace:android ]; then
+                echo "play_stage_only requires Android play-replace"
+                exit 1
+              fi
+              ;;
+            *) echo "Invalid play_stage_only value"; exit 1 ;;
           esac
 
       # Every milestone is JSONL so the log and final job summary can be parsed
@@ -336,16 +352,13 @@ jobs:
       - name: "Milestone: artifact started"
         run: '"$ORCHESTRATOR_MILESTONE_EMITTER" artifact started'
 
-      # Log the FINAL Android AAB's base-manifest permissions (the artifact Google Play
-      # actually validates), plus its sha256 so the submitted binary is provably the one
-      # inspected here. The AAB base manifest is protobuf, but permission-name strings are
-      # stored as plain UTF-8 bytes, so grep -a finds them without aapt2/bundletool.
-      # Log-only (never fails): ad-supported apps legitimately carry AD_ID; this is
-      # observability, not a gate. For ad-free apps, "AD_ID present" here explains a
-      # subsequent Play "Advertising ID" upload rejection before you go hunting.
+      # Decode the FINAL signed AAB with pinned official bundletool, then enforce
+      # its existing runtime-contract permission lists before any Ship mode. Raw
+      # protobuf string matches and source merger reports are not permission proof.
       - name: Android manifest permissions
         if: ${{ inputs.platform == 'android' }}
         run: |
+          set -euo pipefail
           AAB="$RUNNER_TEMP/out.aab"
           echo "sha256: $(sha256sum "$AAB" | cut -d' ' -f1)"
           if grep -q '"react-native-purchases"' "src/${{ inputs.target }}/package.json"; then
@@ -359,16 +372,20 @@ jobs:
             fi
             echo "PASS: signed AAB contains the RevenueCat Android public key marker"
           fi
-          echo "=== base manifest permissions ==="
-          unzip -p "$AAB" base/manifest/AndroidManifest.xml \
-            | grep -aoE '(android|com\.[a-z0-9.]+)\.permission\.[A-Za-z0-9_]+' \
-            | sort -u || true
-          echo "=== AD_ID gate (informational) ==="
-          if unzip -p "$AAB" base/manifest/AndroidManifest.xml | grep -aq 'com\.google\.android\.gms\.permission\.AD_ID'; then
-            echo "PRESENT: com.google.android.gms.permission.AD_ID (OK only if this app declares Advertising ID = Yes)"
-          else
-            echo "ABSENT: com.google.android.gms.permission.AD_ID"
+          BUNDLETOOL="$RUNNER_TEMP/bundletool-all-1.18.3.jar"
+          curl --fail --location --silent --show-error --retry 3 \
+            https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar \
+            --output "$BUNDLETOOL"
+          printf '%s  %s\n' a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29 "$BUNDLETOOL" | sha256sum --check --status
+          MODULE_MANIFESTS="$(unzip -Z1 "$AAB" | grep -E '^[^/]+/manifest/AndroidManifest.xml$')"
+          if [ "$MODULE_MANIFESTS" != base/manifest/AndroidManifest.xml ]; then
+            echo "BLOCKED: signed permission inspection requires an explicit audit of every feature-module manifest"
+            exit 1
           fi
+          MANIFEST="$RUNNER_TEMP/signed-android-manifest.xml"
+          java -jar "$BUNDLETOOL" dump manifest --bundle="$AAB" --module=base > "$MANIFEST"
+          node src/scripts/audit-signed-android-permissions.mjs "src/${{ inputs.target }}" \
+            --manifest "$MANIFEST" --aab "$AAB"
 
       # Match Android's final-artifact observability on iOS. This inspects the signed IPA that
       # would be submitted, without uploading the binary from this public repository. Info.plist,
@@ -474,7 +491,23 @@ jobs:
       - name: Ship (play-replace)
         if: ${{ inputs.submit && inputs.ship_mode == 'play-replace' && inputs.platform == 'android' }}
         working-directory: src/${{ inputs.target }}
-        run: node ../scripts/play-replace-release.mjs "$RUNNER_TEMP/out.aab" production,internal
+        env:
+          PLAY_STAGE_ONLY: ${{ inputs.play_stage_only }}
+        run: |
+          set -euo pipefail
+          args=("$RUNNER_TEMP/out.aab" production,internal)
+          case "$PLAY_STAGE_ONLY" in
+            true)
+              if [ ! -f store/play-release-notes.json ]; then
+                echo "Stage-only replacement requires store/play-release-notes.json"
+                exit 1
+              fi
+              args+=(--stage --notes-file store/play-release-notes.json)
+              ;;
+            false) ;;
+            *) echo "Invalid play_stage_only value"; exit 1 ;;
+          esac
+          node ../scripts/play-replace-release.mjs "${args[@]}"
 
       # A complete Android release can require listings and the final AAB in one
       # edit. Keep the private artifact on this runner until that atomic commit;
