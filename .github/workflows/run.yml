@@ -323,6 +323,50 @@ jobs:
             echo "org.gradle.daemon=false"
           } >> "$HOME/.gradle/gradle.properties"
 
+      # Hosted runners have answered HTTP 504 for GitHub-hosted downloads while the same URLs
+      # worked elsewhere: Gradle's distribution (services.gradle.org redirects to GitHub releases)
+      # and a Maven artifact redirected there (namesake, 2026-11-08, four failed attempts). The
+      # wrapper never retries its download, so prefetch the exact distribution the prebuild template
+      # uses, verify Gradle's published SHA-256, and place it where the wrapper looks
+      # (dists/<name>/<base-36 MD5 of the URL>/). Gradle's repository retries cover dependencies.
+      # Download resilience only: on any failure this warns and the wrapper downloads as before.
+      - name: Android download resilience
+        if: ${{ inputs.platform == 'android' }}
+        working-directory: src/${{ inputs.target }}
+        run: |
+          {
+            echo "systemProp.org.gradle.internal.repository.max.retries=8"
+            echo "systemProp.org.gradle.internal.repository.initial.backoff=2000"
+            echo "systemProp.org.gradle.internal.http.connectionTimeout=120000"
+            echo "systemProp.org.gradle.internal.http.socketTimeout=120000"
+          } >> "$HOME/.gradle/gradle.properties"
+          major=$(node -p "String(require('./package.json').dependencies?.expo ?? '').replace(/^[^0-9]*/, '').split('.')[0]")
+          tmp=$(mktemp -d)
+          if [ -n "$major" ] && (cd "$tmp" && npm pack "expo-template-bare-minimum@sdk-$major" --silent >/dev/null 2>&1); then
+            tar -xzf "$tmp"/expo-template-bare-minimum-*.tgz -C "$tmp" package/android/gradle/wrapper/gradle-wrapper.properties 2>/dev/null || true
+          fi
+          urls=""
+          for f in "$tmp/package/android/gradle/wrapper/gradle-wrapper.properties" node_modules/@react-native/gradle-plugin/gradle/wrapper/gradle-wrapper.properties; do
+            [ -f "$f" ] && urls="$urls $(sed -n 's/^distributionUrl=//p' "$f" | sed 's/\\:/:/g' | tr -d '\r')"
+          done
+          [ -n "$urls" ] || echo "::warning::No Gradle wrapper distributionUrl found to prefetch"
+          for url in $(printf '%s\n' $urls | sort -u); do
+            name=$(basename "$url" .zip)
+            hash=$(node -e "const c=require('crypto');console.log(BigInt('0x'+c.createHash('md5').update(process.argv[1]).digest('hex')).toString(36))" "$url")
+            dir="$HOME/.gradle/wrapper/dists/$name/$hash"
+            mkdir -p "$dir"
+            if curl --fail --location --retry 10 --retry-all-errors --retry-delay 15 --silent --show-error -o "$dir/$name.zip.part" "$url" \
+              && expected=$(curl --fail --location --retry 10 --retry-all-errors --retry-delay 15 --silent --show-error "$url.sha256") \
+              && echo "$expected  $dir/$name.zip.part" | sha256sum --check --status; then
+              mv "$dir/$name.zip.part" "$dir/$name.zip"
+              echo "Prefetched and verified $url"
+            else
+              rm -f "$dir/$name.zip.part"
+              echo "::warning::Could not prefetch $url; the Gradle wrapper will download it itself"
+            fi
+          done
+          rm -rf "$tmp"
+
       # EXPO_ASC_*: lets eas mint/validate iOS credentials (dist cert check +
       # provisioning profile) NON-interactively via the ASC API key — required
       # for a brand-new app's FIRST iOS build (before this, first builds needed
